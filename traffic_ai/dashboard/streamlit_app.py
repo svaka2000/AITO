@@ -1467,10 +1467,14 @@ def _render_ai_advisor_tab(data: DashboardData | None) -> None:
     )
 
     # --- API key ---
+    # Check Streamlit secrets (cloud deployment) first, then .env, then manual input
+    secret_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
     env_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if env_key:
-        api_key = env_key
-        st.success("API key loaded from .env", icon="🔑")
+    auto_key = secret_key or env_key
+
+    if auto_key:
+        api_key = auto_key
+        st.success("API key loaded automatically.", icon="🔑")
     else:
         api_key = st.text_input(
             "Anthropic API Key",
