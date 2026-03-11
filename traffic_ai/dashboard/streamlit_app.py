@@ -21,7 +21,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from traffic_ai.config.settings import Settings, load_settings
-from traffic_ai.controllers import AdaptiveRuleController, FixedTimingController
+from traffic_ai.controllers import (
+    AdaptiveRuleController,
+    FixedTimingController,
+    RLPolicyController,
+    SupervisedMLController,
+)
 from traffic_ai.experiments import ExperimentArtifacts, ExperimentRunner
 from traffic_ai.metrics import simulation_result_to_step_dataframe
 from traffic_ai.simulation_engine import SimulatorConfig, TrafficNetworkSimulator
@@ -1122,8 +1127,12 @@ def _render_live_simulation_panel(settings: Settings) -> None:
         row1_col1, row1_col2, row1_col3 = st.columns(3)
         controller_label = row1_col1.selectbox(
             "Controller",
-            ["Adaptive Rule", "Fixed Timing"],
-            help="Adaptive Rule dynamically adjusts green time based on queue length. Fixed Timing uses a constant 30s cycle.",
+            ["Adaptive Rule", "Fixed Timing", "Q-Learning (RL)", "DQN (RL)", "Random Forest (ML)"],
+            help=(
+                "Adaptive Rule dynamically adjusts green time based on queue length. "
+                "Fixed Timing uses a constant 30s cycle. "
+                "Q-Learning, DQN, and Random Forest are AI controllers trained on-the-fly before the simulation runs."
+            ),
         )
         sim_steps = int(row1_col2.slider("Simulation Steps", 100, 3000, 800, 100))
         intersections = int(
@@ -1178,11 +1187,42 @@ def _render_live_simulation_panel(settings: Settings) -> None:
         seed=settings.seed,
     )
     simulator = TrafficNetworkSimulator(sim_cfg)
-    controller = (
-        AdaptiveRuleController()
-        if controller_label == "Adaptive Rule"
-        else FixedTimingController()
-    )
+
+    if controller_label == "Adaptive Rule":
+        controller = AdaptiveRuleController()
+    elif controller_label == "Q-Learning (RL)":
+        from traffic_ai.rl_models.environment import EnvConfig, SignalControlEnv
+        from traffic_ai.rl_models.q_learning import train_q_learning
+        with st.spinner("Training Q-Learning agent..."):
+            env = SignalControlEnv(EnvConfig(seed=settings.seed))
+            policy, _ = train_q_learning(env, episodes=300, seed=settings.seed)
+        controller = RLPolicyController(policy=policy, name="rl_qlearning")
+    elif controller_label == "DQN (RL)":
+        from traffic_ai.rl_models.environment import EnvConfig, SignalControlEnv
+        from traffic_ai.rl_models.dqn import train_dqn
+        with st.spinner("Training DQN agent..."):
+            env = SignalControlEnv(EnvConfig(seed=settings.seed))
+            policy, _, _ = train_dqn(env, episodes=220, seed=settings.seed)
+        controller = RLPolicyController(policy=policy, name="rl_dqn")
+    elif controller_label == "Random Forest (ML)":
+        from sklearn.ensemble import RandomForestClassifier
+        from traffic_ai.rl_models.environment import EnvConfig, SignalControlEnv
+        with st.spinner("Training Random Forest controller..."):
+            env = SignalControlEnv(EnvConfig(seed=settings.seed))
+            rng = np.random.default_rng(settings.seed)
+            X, y = [], []
+            state = env.reset()
+            for _ in range(4000):
+                action = int(state[0] < state[1])  # simple heuristic labels
+                X.append(state[:8] if len(state) >= 8 else np.pad(state, (0, max(0, 8 - len(state)))))
+                y.append(action)
+                next_state, _, done, _ = env.step(action)
+                state = env.reset() if done else next_state
+            clf = RandomForestClassifier(n_estimators=40, random_state=settings.seed)
+            clf.fit(X, y)
+        controller = SupervisedMLController(model=clf)
+    else:
+        controller = FixedTimingController()
 
     with st.spinner("Running network simulation..."):
         result = simulator.run(controller, steps=sim_steps)
