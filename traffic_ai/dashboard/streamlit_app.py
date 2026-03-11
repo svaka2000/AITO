@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anthropic
 import numpy as np
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from traffic_ai.config.settings import Settings, load_settings
 from traffic_ai.controllers import AdaptiveRuleController, FixedTimingController
@@ -1417,6 +1422,151 @@ def _render_sidebar(settings: Settings) -> tuple[bool, bool, bool, bool, bool]:
 # Main Entry Point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# AI Advisor tab
+# ---------------------------------------------------------------------------
+
+_AI_SYSTEM_PROMPT = """You are an expert AI research assistant specializing in traffic signal optimization.
+You are embedded in a science fair research platform (GSDSEF) built by Samarth Vaka that benchmarks
+10 traffic signal controllers across 4 families: Fixed Timing (baseline), Adaptive Rule,
+Supervised ML (Random Forest, XGBoost, Gradient Boosting, MLP, Logistic Regression),
+and Reinforcement Learning (Q-Learning, DQN, Policy Gradient).
+
+Metrics (lower is better unless noted):
+- average_wait_time: seconds vehicles wait at red lights
+- average_queue_length: vehicles queued per intersection
+- average_throughput: vehicles processed per step (higher is better)
+- average_emissions_proxy: estimated emissions (lower is better)
+- average_fairness: Gini-based fairness score (higher = more fair)
+- average_efficiency_score: composite score (higher is better)
+
+You have access to the actual experimental results below. Answer questions about these specific
+results accurately and concisely. Do not invent numbers — only reference the data provided.
+If asked about limitations, note that RL controllers may be under-trained in quick-run mode
+(fewer episodes/steps), which can cause them to underperform relative to their true potential.
+
+{data_context}
+"""
+
+
+def _build_data_context(data: DashboardData | None) -> str:
+    if data is None or data.summary_df.empty:
+        return "No benchmark results are loaded yet. Ask the user to run a benchmark first."
+    df = data.summary_df.copy()
+    df["controller"] = df["controller"].map(
+        lambda x: CONTROLLER_DISPLAY_NAMES.get(x, x)
+    )
+    return "EXPERIMENTAL RESULTS (controller summary):\n" + df.to_string(index=False)
+
+
+def _render_ai_advisor_tab(data: DashboardData | None) -> None:
+    st.subheader("AI Traffic Advisor")
+    st.caption(
+        "Ask Claude questions about your experimental results. "
+        "Claude has your benchmark data loaded as context."
+    )
+
+    # --- API key ---
+    env_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if env_key:
+        api_key = env_key
+        st.success("API key loaded from .env", icon="🔑")
+    else:
+        api_key = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            placeholder="sk-ant-...",
+            help="Your key is never stored — it lives only in this browser session.",
+        )
+
+    if not api_key:
+        st.info("Add your Anthropic API key to the .env file or paste it above to get started.")
+        return
+
+    # --- Data context status ---
+    if data is None or data.summary_df.empty:
+        st.warning("No benchmark results loaded. Run a benchmark first, then come back here.")
+        return
+
+    n_controllers = len(data.summary_df)
+    st.caption(f"Context: {n_controllers} controllers loaded into Claude's context.")
+
+    # --- Chat history ---
+    if "ai_advisor_messages" not in st.session_state:
+        st.session_state["ai_advisor_messages"] = []
+
+    messages: list[dict] = st.session_state["ai_advisor_messages"]
+
+    # Render existing chat history
+    for msg in messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # --- Suggested questions ---
+    if not messages:
+        st.markdown("**Try asking:**")
+        suggestions = [
+            "Which controller had the lowest average wait time and why might that be?",
+            "Why do RL controllers sometimes underperform simpler methods?",
+            "Which controller would you recommend for a high-traffic urban intersection?",
+            "What do the results suggest about the trade-off between ML and RL approaches?",
+        ]
+        cols = st.columns(2)
+        for i, suggestion in enumerate(suggestions):
+            if cols[i % 2].button(suggestion, key=f"suggestion_{i}", use_container_width=True):
+                st.session_state["ai_advisor_pending"] = suggestion
+                st.rerun()
+
+    # Handle suggested question click
+    pending = st.session_state.pop("ai_advisor_pending", None)
+
+    # --- Chat input ---
+    user_input = st.chat_input("Ask about your traffic optimization results...")
+    prompt = pending or user_input
+
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        system_prompt = _AI_SYSTEM_PROMPT.format(
+            data_context=_build_data_context(data)
+        )
+
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
+            full_response = ""
+            try:
+                client = anthropic.Anthropic(api_key=api_key)
+                with client.messages.stream(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1024,
+                    system=system_prompt,
+                    messages=[
+                        {"role": m["role"], "content": m["content"]}
+                        for m in messages
+                    ],
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_response += text
+                        response_placeholder.markdown(full_response + "▌")
+                response_placeholder.markdown(full_response)
+            except anthropic.AuthenticationError:
+                full_response = "Invalid API key. Check your .env file or the key you entered."
+                response_placeholder.error(full_response)
+            except Exception as e:
+                full_response = f"Error contacting Claude: {e}"
+                response_placeholder.error(full_response)
+
+        messages.append({"role": "assistant", "content": full_response})
+
+    # Clear chat button
+    if messages:
+        if st.button("Clear conversation", key="clear_ai_chat"):
+            st.session_state["ai_advisor_messages"] = []
+            st.rerun()
+
+
 def run_dashboard() -> None:
     settings = load_settings()
     _inject_custom_theme()
@@ -1456,8 +1606,8 @@ def run_dashboard() -> None:
     source_label = st.session_state.get("dashboard_source")
     _render_header(source_label)
 
-    benchmark_tab, simulation_tab, grid_tab = st.tabs(
-        ["Benchmark Lab", "Live Simulation", "Grid Playground"]
+    benchmark_tab, simulation_tab, grid_tab, ai_tab = st.tabs(
+        ["Benchmark Lab", "Live Simulation", "Grid Playground", "AI Advisor"]
     )
 
     with benchmark_tab:
@@ -1472,6 +1622,9 @@ def run_dashboard() -> None:
 
     with grid_tab:
         _render_grid_simulation_panel(settings)
+
+    with ai_tab:
+        _render_ai_advisor_tab(st.session_state.get("dashboard_data"))
 
 
 if __name__ == "__main__":
