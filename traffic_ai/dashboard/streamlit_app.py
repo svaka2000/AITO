@@ -1127,11 +1127,12 @@ def _render_live_simulation_panel(settings: Settings) -> None:
         row1_col1, row1_col2, row1_col3 = st.columns(3)
         controller_label = row1_col1.selectbox(
             "Controller",
-            ["Adaptive Rule", "Fixed Timing", "Q-Learning (RL)", "DQN (RL)", "Random Forest (ML)"],
+            ["Adaptive Rule", "Fixed Timing", "Q-Learning (RL)", "DQN (RL)", "Random Forest (ML)", "Claude AI"],
             help=(
                 "Adaptive Rule dynamically adjusts green time based on queue length. "
                 "Fixed Timing uses a constant 30s cycle. "
-                "Q-Learning, DQN, and Random Forest are AI controllers trained on-the-fly before the simulation runs."
+                "Q-Learning, DQN, and Random Forest are AI controllers trained on-the-fly. "
+                "Claude AI uses the Anthropic API to make real-time signal decisions — requires an API key."
             ),
         )
         sim_steps = int(row1_col2.slider("Simulation Steps", 100, 3000, 800, 100))
@@ -1188,7 +1189,64 @@ def _render_live_simulation_panel(settings: Settings) -> None:
     )
     simulator = TrafficNetworkSimulator(sim_cfg)
 
-    if controller_label == "Adaptive Rule":
+    if controller_label == "Claude AI":
+        # Resolve API key (secrets > env > session state)
+        secret_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+        claude_api_key = secret_key or os.getenv("ANTHROPIC_API_KEY", "") or st.session_state.get("claude_api_key_input", "")
+        if not claude_api_key:
+            claude_api_key = st.text_input(
+                "Anthropic API Key (required for Claude AI controller)",
+                type="password",
+                placeholder="sk-ant-...",
+                key="claude_api_key_input",
+            )
+        if not claude_api_key:
+            st.warning("Enter your Anthropic API key above to use the Claude AI controller.")
+            return
+
+        class _ClaudeController(AdaptiveRuleController):
+            """Uses Claude to decide NS/EW green at each decision window."""
+
+            def __init__(self, key: str, decision_interval: int = 15) -> None:
+                super().__init__()
+                self.name = "claude_ai"
+                self._client = anthropic.Anthropic(api_key=key)
+                self._interval = decision_interval
+                self._cache: dict[int, str] = {}  # intersection -> current phase
+
+            def compute_actions(
+                self, observations: dict[int, dict[str, float]], step: int
+            ) -> dict[int, "SignalPhase"]:
+                actions: dict[int, "SignalPhase"] = {}
+                for iid, obs in observations.items():
+                    # Only query Claude every `_interval` steps; reuse cached phase otherwise
+                    if step % self._interval == 0:
+                        prompt = (
+                            f"You are controlling traffic signal intersection {iid}. "
+                            f"Current state: NS queue={obs.get('queue_ns', 0):.1f} vehicles, "
+                            f"EW queue={obs.get('queue_ew', 0):.1f} vehicles, "
+                            f"total queue={obs.get('total_queue', 0):.1f}, "
+                            f"current phase elapsed={obs.get('phase_elapsed', 0):.0f}s, "
+                            f"avg wait={obs.get('wait_sec', 0):.1f}s. "
+                            "Reply with exactly one word: NS or EW — which direction should get the green light?"
+                        )
+                        try:
+                            resp = self._client.messages.create(
+                                model="claude-haiku-4-5-20251001",
+                                max_tokens=5,
+                                messages=[{"role": "user", "content": prompt}],
+                            )
+                            text = resp.content[0].text.strip().upper()
+                            phase: "SignalPhase" = "EW" if "EW" in text else "NS"
+                        except Exception:
+                            phase = "EW" if obs.get("queue_ew", 0) > obs.get("queue_ns", 0) else "NS"
+                        self._cache[iid] = phase
+                    actions[iid] = self._cache.get(iid, "NS")  # type: ignore[assignment]
+                return actions
+
+        controller = _ClaudeController(key=claude_api_key)
+        st.info(f"Claude AI controller active — querying API every 15 simulation steps per intersection.")
+    elif controller_label == "Adaptive Rule":
         controller = AdaptiveRuleController()
     elif controller_label == "Q-Learning (RL)":
         from traffic_ai.rl_models.environment import EnvConfig, SignalControlEnv
