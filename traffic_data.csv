@@ -1,4 +1,0 @@
-timestamp,mode,run_number,avg_wait_time,cars_cleared,max_queue_N,max_queue_S,max_queue_E,max_queue_W,total_light_changes
-2025-12-23 15:15:41,FIXED,1,5.83,107,0,0,0,0,58
-2025-12-23 15:17:55,FIXED,2,6.49,107,0,0,0,0,56
-2025-12-23 16:21:52,FIXED,1,6.8,107,0,0,0,0,58
