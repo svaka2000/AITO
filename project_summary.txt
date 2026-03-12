@@ -1,0 +1,205 @@
+GSDSEF — AI Traffic Signal Optimization Platform
+=================================================
+Author: Samarth Vaka | Purpose: Science fair (GSDSEF) research comparing AI traffic signal controllers
+
+
+WHAT THE PROJECT DOES
+---------------------
+The platform simulates a 4-intersection traffic network and benchmarks 10 different signal controllers
+(from naive fixed timing to deep RL) against each other. Every run produces CSVs, statistical tests,
+and publication-quality charts for the science fair board.
+
+
+PROJECT ROOT FILES
+------------------
+main.py            - CLI entry point: parses args, loads config, runs ExperimentRunner, prints artifact paths as JSON
+requirements.txt   - Python deps (scikit-learn, xgboost, torch, streamlit, fastapi, etc.)
+setup.py           - Package installation config
+pytest.ini         - Test runner config
+README.md          - Project documentation
+PLANS.md           - Development roadmap
+AGENTS.md          - Agent/AI collaboration notes
+
+
+traffic_ai/ — THE CORE PYTHON PACKAGE
+======================================
+
+config/
+-------
+default_config.yaml  - Master config: simulation params (4 intersections, 2000 steps, rush-hour demand),
+                       controller list, CV folds, Kaggle dataset IDs, significance alpha
+settings.py          - Settings class that loads the YAML and exposes typed accessors
+
+
+simulation_engine/ — The Heart of the Simulation
+-------------------------------------------------
+engine.py   - TrafficNetworkSimulator: the main simulation loop
+              - Arranges intersections in a sqrt-grid (2x2 by default)
+              - Each step: applies pending inflows → updates signal phases → samples Poisson vehicle
+                arrivals → services green-phase lanes → propagates 65% of departures to neighbors
+              - Computes per-step metrics: queue length, avg wait, throughput, emissions proxy,
+                fuel proxy, Gini-based fairness score
+demand.py   - DemandModel: time-varying arrival rates (rush hour profile scales demand 2.5x)
+types.py    - Shared dataclasses: IntersectionState, StepMetrics, SimulationResult, SignalPhase ("NS" or "EW")
+
+
+controllers/ — The 10 Signal Controllers
+-----------------------------------------
+Controller          File                  How It Works
+------------        ----                  ------------
+Fixed Timing        fixed_timing.py       60s cycle, 55/45 NS/EW split — no sensing
+Adaptive Rule       adaptive_rule.py      Switches phase if queue imbalance > threshold (6 veh),
+                                          min 15s / max 75s green
+Random Forest       ml_controllers.py     Sklearn RF trained on simulation-derived phase labels
+Gradient Boosting   ml_controllers.py     GBM variant
+XGBoost             ml_controllers.py     XGBoost variant
+MLP                 ml_controllers.py     64-64 neural net (sklearn)
+Q-Learning          rl_controllers.py     Tabular Q-table, discretized state
+DQN                 rl_controllers.py     64-64 PyTorch net + experience replay + target network
+Policy Gradient     rl_controllers.py     Actor-critic (REINFORCE with baseline)
+Logistic/Timeseries ml_controller.py      Logistic regression baseline
+
+base.py     - BaseController protocol: reset() + compute_actions(observations, step) → dict[int, SignalPhase]
+factory.py  - build_baseline_controllers(), build_supervised_controllers(), build_rl_controllers(),
+              merge_controller_sets()
+
+
+ml_models/ — Supervised Learning Suite
+---------------------------------------
+supervised.py         - SupervisedModelSuite: trains RF, GBM, XGBoost, MLP, Logistic with GridSearchCV
+                        over TimeSeriesSplit CV folds; evaluates accuracy/precision/recall/F1;
+                        saves .joblib models
+controller_models.py  - train_supervised_controller_models(): trains the models used inside controller wrappers
+
+
+rl_models/ — Reinforcement Learning Suite
+------------------------------------------
+environment.py      - SignalControlEnv: OpenAI Gym-style env wrapping the simulator;
+                      reward = negative queue length
+q_learning.py       - Tabular Q-learning with epsilon-greedy exploration
+dqn.py              - DQN: DQNetwork (64→64→2), replay buffer (20k), target net synced every 10 episodes,
+                      Adam optimizer, epsilon decay from 1.0→0.05
+policy_gradient.py  - REINFORCE actor-critic with advantage baseline
+trainer.py          - train_rl_policy_suite(): trains all 3 RL policies, returns policies + reward histories
+
+
+experiments/ — The Orchestrator
+--------------------------------
+runner.py  - ExperimentRunner: the top-level pipeline
+             1. Run data pipeline (ingest + preprocess)
+             2. Train supervised model suite (with CV)
+             3. Train RL policies
+             4. Build all 10 controllers
+             5. Run each controller across N CV folds x 2000 sim steps
+             6. Aggregate metrics, run pairwise Mann-Whitney significance tests, bootstrap CIs
+             7. Run ablation study on AdaptiveRuleController (3 thresholds x 3 min-green = 9 configs)
+             8. Save all CSVs, generate 5 plots, write run_manifest.json
+
+
+metrics/
+--------
+core.py        - simulation_result_to_summary_row(), aggregate_experiment_rows(),
+                 compute_system_efficiency_score()
+statistics.py  - pairwise_significance_tests() (Mann-Whitney U), controller_bootstrap_table() (bootstrap CIs)
+
+
+data_pipeline/
+--------------
+ingestion.py      - Downloads public CSVs (Plotly traffic, airline-passengers as proxy),
+                    optionally pulls Kaggle datasets
+cleaning.py       - Drops nulls, normalizes columns
+features.py       - Extracts time-of-day, rolling queue features
+preprocessing.py  - Train/val/test split → PreparedDataset
+pipeline.py       - TrafficDataPipeline: chains all steps
+
+
+visualization/
+--------------
+plots.py  - 5 matplotlib/seaborn charts:
+            1. plot_controller_performance   - bar chart, all controllers ranked by avg wait
+            2. plot_queue_and_wait_curves    - time-series queue + wait over 2000 steps
+            3. plot_traffic_heatmap          - intersection-level queue heatmap
+            4. plot_learning_curves          - RL reward per episode
+            5. plot_model_metrics_table      - supervised model accuracy/F1 table
+
+
+dashboard/
+----------
+streamlit_app.py  - Interactive Streamlit web UI with:
+                    - File uploader for experiment CSVs
+                    - KPI strip (wait time, throughput, queue, efficiency vs fixed-timing baseline)
+                    - Tabs: Performance, Step Metrics, Statistical Tests, Grid Sim, Research Summary
+                    - Friendly display names for controllers and columns
+                    - Science-fair Research Summary tab (research question, hypothesis, findings, conclusion)
+
+
+api/
+----
+server.py  - FastAPI REST server exposing experiment results programmatically
+
+
+utils/
+------
+io_utils.py         - write_dataframe(), write_json(), save_model() helpers
+reproducibility.py  - set_global_seed() (numpy + torch + random)
+
+
+simulation/ (secondary/legacy)
+-------------------------------
+intersection.py  - Earlier single-intersection model (used by dashboard's grid sim tab)
+metrics.py       - Companion metrics for that model
+
+
+artifacts/ — OUTPUT DIRECTORY (generated by runs)
+==================================================
+artifacts/
+  results/
+    controller_summary.csv        - mean metrics per controller (primary results)
+    controller_step_metrics.csv   - per-step data for all controllers x folds
+    significance_tests.csv        - pairwise Mann-Whitney p-values
+    ablation_study.csv            - 9 adaptive-rule hyperparameter configs
+    supervised_model_metrics.csv  - ML model accuracy/F1
+    bootstrap_wait_time_ci.csv    - 95% CI on wait time per controller
+    run_manifest.json             - run metadata
+  plots/
+    controller_performance.png
+    queue_and_wait_curves.png
+    traffic_heatmap.png
+    rl_learning_curves.png
+    supervised_model_metrics.png
+  models/
+    random_forest.joblib
+    gradient_boosting.joblib
+    xgboost.joblib
+    mlp.joblib
+    (+ other trained models)
+
+
+tests/
+======
+66 pytest tests covering simulation engine, controllers, metrics, data pipeline, and RL training.
+Run with: pytest -q
+
+
+KEY DESIGN DECISIONS
+====================
+- SignalPhase is binary: only "NS" or "EW" — simplifies the action space for RL
+- Simulation is stochastic but reproducible: seeded NumPy RNG, CV folds get seed + fold_offset
+- DQN gracefully degrades: if PyTorch is unavailable, falls back to Q-learning
+- Quick-run mode: caps steps at 260 and uses 2 CV folds — for fast iteration during development
+- All controllers share the same Protocol interface: easy to add new ones
+
+
+RUN COMMANDS
+============
+# Start dashboard
+streamlit run traffic_ai/dashboard/streamlit_app.py
+
+# CLI full run
+python main.py --output-dir artifacts
+
+# Quick test run
+python main.py --quick-run
+
+# Run tests
+pytest -q
