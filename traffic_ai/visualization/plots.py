@@ -9,23 +9,58 @@ import seaborn as sns
 
 sns.set_theme(style="whitegrid", palette="deep")
 
+# Consistent color coding: gray=fixed, teal=adaptive, gold=ML, purple=RL
+_CONTROLLER_COLORS: dict[str, str] = {
+    "fixed": "#6b7f8e",
+    "rule": "#0fc5c8",
+    "adaptive": "#0fc5c8",
+    "random_forest": "#ee9b00",
+    "xgb": "#ee9b00",
+    "gradient": "#ee9b00",
+    "mlp": "#ee9b00",
+    "ml_": "#ee9b00",
+    "q_learn": "#9b59b6",
+    "dqn": "#9b59b6",
+    "policy": "#9b59b6",
+    "rl_": "#9b59b6",
+    "ppo": "#9b59b6",
+}
+
+
+def _controller_color(name: str) -> str:
+    n = str(name).lower()
+    for key, color in _CONTROLLER_COLORS.items():
+        if key in n:
+            return color
+    return "#888888"
+
 
 def plot_controller_performance(summary_df: pd.DataFrame, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
     metrics = [
-        ("average_wait_time", "Average Wait Time (s)"),
-        ("average_queue_length", "Average Queue Length"),
-        ("average_throughput", "Average Throughput"),
-        ("average_efficiency_score", "Efficiency Score"),
+        ("average_wait_time", "Average Wait Time (s) — Lower is Better"),
+        ("average_queue_length", "Average Queue Length (vehicles) — Lower is Better"),
+        ("average_throughput", "Average Throughput (vehicles/step) — Higher is Better"),
+        ("average_efficiency_score", "System Efficiency Score — Higher is Better"),
     ]
+    controllers = summary_df["controller"].tolist() if "controller" in summary_df.columns else []
+    palette = [_controller_color(c) for c in controllers]
     for ax, (metric, title) in zip(axes.flatten(), metrics):
-        sns.barplot(data=summary_df, x="controller", y=metric, ax=ax)
-        ax.set_title(title)
-        ax.tick_params(axis="x", rotation=25)
+        if metric not in summary_df.columns:
+            ax.set_visible(False)
+            continue
+        sns.barplot(data=summary_df, x="controller", y=metric, palette=palette, ax=ax)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.tick_params(axis="x", rotation=30)
+        ax.set_xlabel("")
+    fig.suptitle(
+        "AI Traffic Signal Controller Benchmark — 10 Controllers Across 4 Families",
+        fontsize=14, fontweight="bold", y=1.01,
+    )
     fig.tight_layout()
     target = output_dir / "controller_performance_comparison.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return target
 
@@ -48,7 +83,7 @@ def plot_queue_and_wait_curves(step_df: pd.DataFrame, output_dir: Path) -> Path:
     axes[1].legend(fontsize=8, ncol=2)
     fig.tight_layout()
     target = output_dir / "queue_wait_curves.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -65,7 +100,7 @@ def plot_traffic_heatmap(step_df: pd.DataFrame, output_dir: Path) -> Path:
     ax.set_ylabel("Controller")
     fig.tight_layout()
     target = output_dir / "traffic_heatmap.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -79,7 +114,7 @@ def plot_learning_curves(rl_history_df: pd.DataFrame, output_dir: Path) -> Path:
     ax.set_ylabel("Episode Reward")
     fig.tight_layout()
     target = output_dir / "rl_learning_curves.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -99,7 +134,7 @@ def plot_model_metrics_table(model_df: pd.DataFrame, output_dir: Path) -> Path:
     table.scale(1, 1.4)
     fig.tight_layout()
     target = output_dir / "model_performance_table.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -146,7 +181,7 @@ def plot_controller_comparison(
     fig.suptitle("Controller Comparison", fontsize=15, fontweight="bold")
     fig.tight_layout()
     target = output_dir / "controller_comparison.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -170,7 +205,7 @@ def plot_feature_importance(
         ax.set_xlabel("Importance")
     fig.tight_layout()
     target = output_dir / "feature_importance.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -186,7 +221,7 @@ def plot_ablation(
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.text(0.5, 0.5, "No ablation data available", ha="center", va="center")
         target = output_dir / "ablation_heatmap.png"
-        fig.savefig(target, dpi=220)
+        fig.savefig(target, dpi=300)
         plt.close(fig)
         return target
 
@@ -206,7 +241,7 @@ def plot_ablation(
     ax.set_title(f"Ablation Study: {metric_col}")
     fig.tight_layout()
     target = output_dir / "ablation_heatmap.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target
 
@@ -234,6 +269,6 @@ def plot_queue_over_time(
     ax.legend(fontsize=8, ncol=3)
     fig.tight_layout()
     target = output_dir / "queue_over_time.png"
-    fig.savefig(target, dpi=220)
+    fig.savefig(target, dpi=300)
     plt.close(fig)
     return target

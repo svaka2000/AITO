@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Mission
-Build and maintain a research-grade AI traffic signal optimization platform for science-fair and publication-style evaluation.
+Build and maintain a research-grade AI traffic signal optimization platform for GSDSEF (Greater San Diego Science & Engineering Fair) competition and publication-style evaluation. The platform benchmarks 10 signal controllers across 4 families using rigorous statistical methodology. No external AI API dependencies.
 
 ## Engineering Rules
 - Python version: `3.11`.
@@ -10,6 +10,7 @@ Build and maintain a research-grade AI traffic signal optimization platform for 
 - Avoid hard-coded file paths; use config-driven directories.
 - All randomness must respect the global seed in `traffic_ai/config/settings.py`.
 - Persist experiment outputs to `artifacts/` only.
+- No external API dependencies (no Anthropic, OpenAI, or other AI service calls).
 
 ## Data and Experiment Rules
 - Raw datasets go to `data/raw/`, processed data to `data/processed/`.
@@ -18,7 +19,7 @@ Build and maintain a research-grade AI traffic signal optimization platform for 
   - run config JSON
   - metrics CSV
   - model artifacts
-  - plots
+  - plots (300 DPI, publication quality)
 - Include baseline controllers in every comparative run.
 
 ## Quality Rules
