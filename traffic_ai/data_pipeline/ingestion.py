@@ -32,7 +32,17 @@ class DataIngestor:
         include_kaggle: bool = True,
         include_public: bool = True,
         include_local_csv: bool = True,
+        synthetic_dataset_name: str | None = None,
     ) -> list[SourceResult]:
+        """Ingest all enabled data sources.
+
+        Parameters
+        ----------
+        synthetic_dataset_name:
+            If provided, load this named dataset from the DatasetStore
+            (``data/synthetic_datasets/``) and include it in the pipeline
+            instead of (or in addition to) other sources.
+        """
         artifacts: list[SourceResult] = []
         if include_local_csv:
             artifacts.extend(self._ingest_local_csv_files())
@@ -40,6 +50,13 @@ class DataIngestor:
             artifacts.extend(self._ingest_public_sources())
         if include_kaggle:
             artifacts.extend(self._ingest_kaggle_sources())
+
+        # Optional: inject a saved synthetic dataset from the Data Studio
+        if synthetic_dataset_name is not None:
+            studio_artifact = self._ingest_studio_dataset(synthetic_dataset_name)
+            if studio_artifact is not None:
+                artifacts.append(studio_artifact)
+
         if not artifacts:
             artifacts.append(self._generate_synthetic_dataset())
             return artifacts
@@ -49,6 +66,21 @@ class DataIngestor:
         if total_rows < 2500 and not has_synthetic:
             artifacts.append(self._generate_synthetic_dataset())
         return artifacts
+
+    def _ingest_studio_dataset(self, name: str) -> SourceResult | None:
+        """Load a named dataset from the DatasetStore and write it to raw_dir."""
+        try:
+            from traffic_ai.data_pipeline.dataset_store import DatasetStore
+
+            store_dir = Path(self.settings.get("project.synthetic_datasets_dir", "data/synthetic_datasets"))
+            store = DatasetStore(base_dir=store_dir)
+            df, _, _ = store.load(name)
+            safe = re.sub(r"[^a-zA-Z0-9_\\-]", "_", name)
+            target = self.raw_dir / f"studio_{safe}.csv"
+            df.to_csv(target, index=False)
+            return SourceResult(name=f"studio_{safe}", path=target, rows=len(df), columns=list(df.columns))
+        except Exception:
+            return None
 
     def _ingest_local_csv_files(self) -> list[SourceResult]:
         items: list[SourceResult] = []

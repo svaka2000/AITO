@@ -90,3 +90,28 @@ Deliver a modular, reproducible AI traffic optimization research platform with c
 - [x] `CONTROLLER_DISPLAY_NAMES` updated for 14 controllers.
 - [x] `plotly>=5.20.0` added to requirements.txt.
 
+## Phase 9: Synthetic Data Studio — DONE
+
+### Backend
+- [x] `SyntheticDatasetGenerator` (`traffic_ai/data_pipeline/synthetic_generator.py`): `SyntheticDatasetConfig` (35+ parameters), `SyntheticDatasetResult`, fully vectorised NumPy generation (no Python row-loops over samples), pre-computed DemandModel rate table (≤1,152 calls regardless of n_samples).
+- [x] 4 label strategies: `optimal` (1-step simulation comparison), `queue_balance` (heuristic), `fixed` (alternating), `adaptive_rule` (RuleBasedController).
+- [x] 5 special-scenario overlays: incidents (queue ×3, speed ×0.4), weather (volume ×1.3, speed ×0.85), event surges (×4 pre, ×3.5 post), school-zone concentration, emergency-vehicle clearance.
+- [x] `DatasetStore` (`traffic_ai/data_pipeline/dataset_store.py`): atomic CRUD via `os.replace()`, `save`, `load`, `list_datasets`, `delete`, `rename`, `duplicate`, `export_csv`, `get_config`, `_resolve_dir`, `_safe_name`.
+- [x] `ModelTrainer` + `TrainingResult` (`traffic_ai/training/trainer.py`): dispatches RL (EnvConfig parameterised from dataset arrival-rate stats) and ML (feature extraction → `ctrl.fit(X, y_str)`); progress callbacks at each stage.
+- [x] `DataIngestor.ingest_all()` extended with `synthetic_dataset_name` parameter; `_ingest_studio_dataset()` loads and copies saved datasets into the pipeline.
+- [x] `default_config.yaml`: added `synthetic_datasets_dir: data/synthetic_datasets`.
+
+### Dashboard
+- [x] "Data Studio" fourth top-level tab added to `run_dashboard()`.
+- [x] 4A — Dataset Manager: glassmorphism `.dataset-card` cards (View / Dup / CSV / Del buttons), empty-state CTA, 3-per-row grid.
+- [x] 4B — Generator panel: 7 sections (Basics, Network, Volume, Temporal, Scenarios, Labels, Preview & Generate), estimated generation-time display, live progress bar, toast on completion.
+- [x] 4C — Dataset Detail: Plotly line + histogram + hour×day heatmap, Download CSV, Edit & Regenerate (pre-fills sliders), Train Model shortcut.
+- [x] 4D — Training Workbench: controller selector with info card, dataset selector, RL/ML-adaptive config, `st.status()` live training, reward-curve plot, evaluation metrics.
+- [x] 4E — Model Comparison: bar chart of last result's evaluation metrics.
+- [x] `.dataset-card` glassmorphism CSS with `transform: scale(1.02)` hover + `transition: all 0.2s ease`.
+- [x] `CONTROLLER_DISPLAY_NAMES` extended with 10 Data Studio trainer keys.
+- [x] Sidebar Data Studio shortcut label added.
+
+### Tests
+- [x] `tests/test_synthetic_generator.py`: 24 tests — columns, row caps, all 4 label strategies, scenario injection (incidents/weather/events shift distributions), full DatasetStore CRUD roundtrip, ModelTrainer DQN 5-episode smoke, Random Forest smoke.
+

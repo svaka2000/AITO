@@ -7,7 +7,7 @@
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 66](https://img.shields.io/badge/tests-66%20passing-brightgreen.svg)]()
+[![Tests: 90](https://img.shields.io/badge/tests-90%20passing-brightgreen.svg)]()
 
 </div>
 
@@ -60,6 +60,41 @@ TrafficAI/
 ```
 
 Items marked with ★ are new additions for the Caltrans demonstration.
+
+---
+
+## Synthetic Data Studio
+
+The Data Studio is an interactive dashboard page for designing and generating custom synthetic traffic datasets, then training any controller directly on them — no Kaggle API key or real-world data required.
+
+### Key capabilities
+
+| Feature | Detail |
+|---------|--------|
+| **Configurable generator** | 35+ parameters: grid size, demand profile, peak multiplier, 5 scenario overlays (incidents, weather, events, school zones, emergency vehicles), directional ratio, signal compliance |
+| **4 label strategies** | `optimal` (simulation-based, best quality), `queue_balance` (heuristic, fast), `fixed` (alternating baseline), `adaptive_rule` (RuleBasedController) |
+| **Vectorised generation** | 100 k rows in < 5 s; pure NumPy, no Python row-loops |
+| **Persistent storage** | `DatasetStore` with atomic CRUD — save/load/rename/duplicate/delete/export CSV |
+| **One-click training** | Train any RL or ML controller on a saved dataset from within the dashboard |
+| **Live progress** | Animated `st.status()` + reward curve chart during RL training |
+
+### Usage
+
+1. Launch the dashboard: `streamlit run traffic_ai/dashboard/streamlit_app.py`
+2. Click the **Data Studio** tab.
+3. Click **Create New Dataset**, configure parameters, click **Generate Dataset**.
+4. Click **View** on a saved dataset card, then **Train Model →** to open the Training Workbench.
+5. Select a controller, configure hyperparameters, click **Start Training**.
+
+### Using a saved dataset in the pipeline
+
+```python
+from traffic_ai.data_pipeline.ingestion import DataIngestor
+from traffic_ai.config.settings import load_settings
+
+ingestor = DataIngestor(load_settings())
+artifacts = ingestor.ingest_all(synthetic_dataset_name="my_rush_hour_dataset")
+```
 
 ---
 
@@ -152,7 +187,7 @@ Uses official EPA factors:
 - **Mann-Whitney U tests** (α=0.05) for pairwise significance
 - **Bootstrap confidence intervals** (95% CI, 300 resamples)
 - **Ablation study** for hyperparameter sensitivity
-- **66 unit tests** (pytest)
+- **90 unit tests** (pytest)
 
 ---
 

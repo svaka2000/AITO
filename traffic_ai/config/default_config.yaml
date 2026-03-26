@@ -2,6 +2,7 @@ project:
   name: traffic_ai_optimization
   seed: 42
   output_dir: artifacts
+  synthetic_datasets_dir: data/synthetic_datasets
 
 data:
   raw_dir: data/raw

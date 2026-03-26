@@ -40,6 +40,7 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 CONTROLLER_DISPLAY_NAMES: dict[str, str] = {
+    # Benchmark / experiment runner keys
     "fixed_timing": "Fixed Timing (Baseline)",
     "adaptive_rule": "Adaptive Rule",
     "ml_randomforestclassifier": "Random Forest (ML)",
@@ -55,6 +56,17 @@ CONTROLLER_DISPLAY_NAMES: dict[str, str] = {
     "rl_sac": "SAC Discrete (RL)",
     "rl_maddpg": "MADDPG Multi-Agent (RL)",
     "rl_recurrent_ppo": "Recurrent PPO LSTM (RL)",
+    # Data Studio / ModelTrainer keys
+    "q_learning": "Q-Learning (RL)",
+    "dqn": "Deep Q-Network (RL)",
+    "policy_gradient": "Policy Gradient (RL)",
+    "a2c": "A2C (RL)",
+    "sac": "SAC Discrete (RL)",
+    "recurrent_ppo": "Recurrent PPO LSTM (RL)",
+    "random_forest": "Random Forest (ML)",
+    "xgboost": "XGBoost (ML)",
+    "gradient_boosting": "Gradient Boosting (ML)",
+    "mlp": "Neural Network MLP (ML)",
 }
 
 # Controller info cards content (WS5)
@@ -512,6 +524,53 @@ def _inject_custom_theme() -> None:
         }
         .ctrl-info-card {
             animation: fadeSlideIn 0.35s ease both;
+        }
+
+        /* ---- Data Studio dataset cards ---- */
+        .dataset-card {
+            background: rgba(15, 30, 44, 0.70);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border: 1px solid rgba(56, 189, 248, 0.18);
+            border-radius: 14px;
+            padding: 1rem 1.15rem 0.9rem;
+            margin-bottom: 0.55rem;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+        .dataset-card:hover {
+            border-color: rgba(56, 189, 248, 0.42);
+            box-shadow: 0 6px 22px rgba(0, 0, 0, 0.38);
+            transform: scale(1.02);
+        }
+        .dataset-card .ds-name {
+            font-size: 0.97rem;
+            font-weight: 600;
+            color: #dff0fa;
+            margin-bottom: 0.18rem;
+        }
+        .dataset-card .ds-meta {
+            font-size: 0.78rem;
+            color: #7ab0c8;
+        }
+        .dataset-card .ds-badge {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 0.14rem 0.5rem;
+            font-size: 0.70rem;
+            font-weight: 600;
+            background: rgba(56, 189, 248, 0.10);
+            color: #a8daf5;
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            margin-right: 0.3rem;
+        }
+        .studio-section-header {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #b8d8e8;
+            border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+            padding-bottom: 0.35rem;
+            margin-bottom: 0.85rem;
         }
         </style>
         """,
@@ -2036,6 +2095,898 @@ def _render_grid_simulation_panel(settings: Settings) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Data Studio
+# ---------------------------------------------------------------------------
+
+_LABEL_STRATEGY_DESCRIPTIONS: dict[str, str] = {
+    "optimal": "Simulation-based: runs 1-step NS vs EW, picks phase that clears most queue. Highest quality, slowest.",
+    "queue_balance": "Heuristic: green goes to the heavier direction. Fast, ~94% accuracy vs optimal.",
+    "fixed": "Alternates NS/EW every 30 steps regardless of conditions. Useful for baseline datasets.",
+    "adaptive_rule": "Uses RuleBasedController to generate labels. Medium quality, fast.",
+}
+
+_STUDIO_ALL_CONTROLLERS = [
+    "q_learning", "dqn", "policy_gradient", "a2c", "sac", "recurrent_ppo",
+    "random_forest", "xgboost", "gradient_boosting", "mlp",
+]
+
+_STUDIO_CTRL_LABELS = {
+    "q_learning": "Q-Learning (RL)",
+    "dqn": "Deep Q-Network (RL)",
+    "policy_gradient": "Policy Gradient (RL)",
+    "a2c": "A2C (RL)",
+    "sac": "SAC Discrete (RL)",
+    "recurrent_ppo": "Recurrent PPO (RL)",
+    "random_forest": "Random Forest (ML)",
+    "xgboost": "XGBoost (ML)",
+    "gradient_boosting": "Gradient Boosting (ML)",
+    "mlp": "Neural Network MLP (ML)",
+}
+
+
+def _studio_store(settings: Settings):
+    """Return a DatasetStore rooted at the configured synthetic datasets dir."""
+    from traffic_ai.data_pipeline.dataset_store import DatasetStore
+    base = Path(settings.get("project.synthetic_datasets_dir", "data/synthetic_datasets"))
+    return DatasetStore(base_dir=base)
+
+
+def _refresh_studio_datasets(settings: Settings) -> list[dict]:
+    store = _studio_store(settings)
+    datasets = store.list_datasets()
+    st.session_state["studio_datasets"] = datasets
+    return datasets
+
+
+def _render_dataset_manager(settings: Settings) -> None:
+    """4A — Horizontal dataset cards panel."""
+    datasets: list[dict] = st.session_state.get("studio_datasets") or _refresh_studio_datasets(settings)
+
+    st.markdown('<div class="studio-section-header">Saved Datasets</div>', unsafe_allow_html=True)
+
+    if not datasets:
+        st.markdown(
+            """
+            <div style="text-align:center;padding:2rem 1rem;background:rgba(15,30,44,0.55);
+            border:1px dashed rgba(56,189,248,0.25);border-radius:14px;margin-bottom:1rem;">
+                <div style="font-size:2rem;">📂</div>
+                <div style="color:#8fa8b4;margin-top:0.5rem;">No saved datasets yet.</div>
+                <div style="color:#5fa8c8;font-size:0.85rem;margin-top:0.3rem;">
+                    Use the generator below to create your first dataset →
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    # Render cards in rows of 3
+    active = st.session_state.get("studio_active_dataset")
+    cols_per_row = 3
+    for row_start in range(0, len(datasets), cols_per_row):
+        row_ds = datasets[row_start : row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for col, ds in zip(cols, row_ds):
+            with col:
+                is_active = active == ds["name"]
+                border_col = "rgba(56,189,248,0.55)" if is_active else "rgba(56,189,248,0.18)"
+                rows_k = ds.get("rows", 0)
+                rows_label = f"{rows_k:,}" if rows_k else "—"
+                balance = ds.get("class_balance", {})
+                ns_pct = round(float(balance.get("0", balance.get(0, 0.5))) * 100)
+                st.markdown(
+                    f"""
+                    <div class="dataset-card" style="border-color:{border_col};">
+                        <div class="ds-name">{ds['name']}</div>
+                        <div class="ds-meta">{rows_label} rows &nbsp;·&nbsp; {ds.get('demand_profile','—')}</div>
+                        <div style="margin-top:0.4rem;">
+                            <span class="ds-badge">{ds.get('label_strategy','—')}</span>
+                            <span class="ds-badge">{ds.get('n_intersections','—')} intersections</span>
+                        </div>
+                        <div class="ds-meta" style="margin-top:0.4rem;">
+                            NS {ns_pct}% / EW {100-ns_pct}% &nbsp;·&nbsp; {ds.get('saved_at','')[:10]}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
+                with btn_col1:
+                    if st.button("View", key=f"view_{ds['name']}", use_container_width=True):
+                        st.session_state["studio_active_dataset"] = ds["name"]
+                        st.rerun()
+                with btn_col2:
+                    if st.button("Rename", key=f"ren_{ds['name']}", use_container_width=True):
+                        st.session_state["studio_renaming"] = ds["name"]
+                        st.rerun()
+                with btn_col3:
+                    if st.button("Dup", key=f"dup_{ds['name']}", use_container_width=True):
+                        store = _studio_store(settings)
+                        new_name = ds["name"] + "_copy"
+                        if store.duplicate(ds["name"], new_name):
+                            _refresh_studio_datasets(settings)
+                            st.toast(f"Duplicated as '{new_name}'")
+                            st.rerun()
+                with btn_col4:
+                    if st.button("Del", key=f"del_{ds['name']}", use_container_width=True):
+                        store = _studio_store(settings)
+                        store.delete(ds["name"])
+                        if active == ds["name"]:
+                            st.session_state.pop("studio_active_dataset", None)
+                        _refresh_studio_datasets(settings)
+                        st.toast(f"Deleted '{ds['name']}'")
+                        st.rerun()
+                # Inline rename form
+                if st.session_state.get("studio_renaming") == ds["name"]:
+                    new_n = st.text_input("New name", value=ds["name"], key=f"ren_input_{ds['name']}")
+                    rc1, rc2 = st.columns(2)
+                    with rc1:
+                        if st.button("Confirm", key=f"ren_ok_{ds['name']}", use_container_width=True):
+                            if new_n.strip() and new_n.strip() != ds["name"]:
+                                store = _studio_store(settings)
+                                ok = store.rename(ds["name"], new_n.strip())
+                                if ok:
+                                    if active == ds["name"]:
+                                        st.session_state["studio_active_dataset"] = new_n.strip()
+                                    st.session_state.pop("studio_renaming", None)
+                                    _refresh_studio_datasets(settings)
+                                    st.toast(f"Renamed to '{new_n.strip()}'")
+                                    st.rerun()
+                                else:
+                                    st.error("Rename failed — name may already exist.")
+                            else:
+                                st.session_state.pop("studio_renaming", None)
+                    with rc2:
+                        if st.button("Cancel", key=f"ren_cancel_{ds['name']}", use_container_width=True):
+                            st.session_state.pop("studio_renaming", None)
+                            st.rerun()
+
+
+def _render_dataset_detail(settings: Settings) -> None:
+    """4C — Expanded detail view for the active dataset."""
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    name = st.session_state.get("studio_active_dataset")
+    if not name:
+        return
+
+    store = _studio_store(settings)
+    try:
+        df, cfg, meta = store.load(name)
+    except Exception as exc:
+        st.error(f"Could not load dataset '{name}': {exc}")
+        return
+
+    st.markdown(f'<div class="studio-section-header">Dataset: {name}</div>', unsafe_allow_html=True)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Rows", f"{len(df):,}")
+    m2.metric("Demand Profile", meta.get("demand_profile", "—"))
+    m3.metric("Label Strategy", meta.get("label_strategy", "—"))
+    balance = meta.get("class_balance", {})
+    ns_frac = float(balance.get("0", balance.get(0, 0.5)))
+    m4.metric("NS/EW Balance", f"{ns_frac*100:.0f}% / {(1-ns_frac)*100:.0f}%")
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown("**Traffic Volume by Hour**")
+        if "hour_of_day" in df.columns and "vehicle_count" in df.columns:
+            hourly = df.groupby("hour_of_day")["vehicle_count"].mean().reset_index()
+            fig = px.line(
+                hourly, x="hour_of_day", y="vehicle_count",
+                labels={"hour_of_day": "Hour", "vehicle_count": "Avg Vehicles"},
+                template="plotly_dark",
+            )
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=10, r=10, t=10, b=10), height=240,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_right:
+        st.markdown("**Queue Length Distribution**")
+        if "queue_length" in df.columns:
+            fig2 = px.histogram(
+                df, x="queue_length", nbins=40,
+                template="plotly_dark",
+                color_discrete_sequence=["#38bdf8"],
+            )
+            fig2.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=10, r=10, t=10, b=10), height=240,
+                showlegend=False,
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+    if "hour_of_day" in df.columns and "day_of_week" in df.columns and "queue_length" in df.columns:
+        st.markdown("**Queue Heatmap: Hour × Day of Week**")
+        pivot = df.groupby(["day_of_week", df["hour_of_day"].astype(int)])["queue_length"].mean().unstack(fill_value=0)
+        day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        pivot.index = [day_labels[i] if i < len(day_labels) else str(i) for i in pivot.index]
+        fig3 = go.Figure(
+            go.Heatmap(
+                z=pivot.values,
+                x=[str(c) for c in pivot.columns],
+                y=list(pivot.index),
+                colorscale="Blues",
+                showscale=True,
+            )
+        )
+        fig3.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=10, b=10), height=200,
+            xaxis_title="Hour of Day", yaxis_title="",
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+    dl_col, edit_col, train_col, close_col = st.columns([2, 2, 2, 1])
+    with dl_col:
+        csv_path = store.export_csv(name)
+        with open(csv_path, "rb") as fh:
+            st.download_button(
+                "Download CSV",
+                data=fh,
+                file_name=f"{name}.csv",
+                mime="text/csv",
+                key="detail_dl",
+                use_container_width=True,
+            )
+    with edit_col:
+        if st.button("Edit & Regenerate", use_container_width=True, key="edit_regen"):
+            st.session_state["studio_generator_config"] = cfg
+            st.session_state["studio_show_generator"] = True
+            st.rerun()
+    with train_col:
+        if st.button("Train Model →", use_container_width=True, key="detail_train", type="primary"):
+            st.session_state["studio_train_dataset"] = name
+            st.session_state["studio_show_workbench"] = True
+    with close_col:
+        if st.button("✕", key="detail_close", use_container_width=True):
+            st.session_state.pop("studio_active_dataset", None)
+            st.rerun()
+
+
+def _render_generator_panel(settings: Settings) -> None:
+    """4B — Dataset generator form."""
+    from traffic_ai.data_pipeline.synthetic_generator import (
+        SyntheticDatasetConfig,
+        SyntheticDatasetGenerator,
+    )
+    from traffic_ai.simulation_engine.demand import ALL_DEMAND_PROFILES
+
+    prefill: SyntheticDatasetConfig | None = st.session_state.get("studio_generator_config")
+    show = st.session_state.get("studio_show_generator", False)
+
+    with st.expander("Create New Dataset", expanded=show):
+        # ── Section 1: Basics ────────────────────────────────────────────
+        st.markdown('<div class="studio-section-header">1 · Basics</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            ds_name = st.text_input(
+                "Dataset Name *",
+                value=prefill.name if prefill else "",
+                help="Unique name for this dataset. Will be used as the save directory.",
+            )
+            ds_desc = st.text_area(
+                "Description",
+                value=prefill.description if prefill else "",
+                height=68,
+                help="Optional note about what this dataset represents.",
+            )
+        with c2:
+            n_samples = st.slider(
+                "Number of Samples",
+                1_000, 100_000,
+                value=int(prefill.n_samples) if prefill else 10_000,
+                step=1_000,
+                help="Total rows in the generated dataset.",
+            )
+            time_span = st.slider(
+                "Time Span (days)",
+                1, 365,
+                value=int(prefill.time_span_days) if prefill else 30,
+                help="Number of days of simulated traffic.",
+            )
+            interval = st.selectbox(
+                "Sampling Interval (minutes)",
+                [1, 2, 5, 10, 15, 30, 60],
+                index=[1, 2, 5, 10, 15, 30, 60].index(prefill.sampling_interval_minutes) if prefill else 2,
+                help="Time between observations.",
+            )
+            seed = st.number_input("Random Seed", value=int(prefill.seed) if prefill else 42, step=1)
+
+        # ── Section 2: Network ───────────────────────────────────────────
+        st.markdown('<div class="studio-section-header">2 · Network Configuration</div>', unsafe_allow_html=True)
+        nc1, nc2, nc3 = st.columns(3)
+        with nc1:
+            grid_rows = st.slider("Grid Rows", 1, 5, value=int(prefill.grid_rows) if prefill else 2, help="Rows of the intersection grid.")
+        with nc2:
+            grid_cols = st.slider("Grid Cols", 1, 5, value=int(prefill.grid_cols) if prefill else 2, help="Columns of the intersection grid.")
+        with nc3:
+            lanes = st.slider("Lanes per Direction", 1, 4, value=int(prefill.lanes_per_direction) if prefill else 2, help="Lanes on each approach.")
+        st.caption(f"Total intersections: **{grid_rows * grid_cols}**")
+
+        # ── Section 3: Volume ────────────────────────────────────────────
+        st.markdown('<div class="studio-section-header">3 · Traffic Volume</div>', unsafe_allow_html=True)
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
+            base_rate = st.slider("Base Arrival Rate", 0.02, 0.50, value=float(prefill.base_arrival_rate) if prefill else 0.12, step=0.01, help="Vehicles/second/lane at off-peak.")
+        with v2:
+            peak_mult = st.slider("Peak Multiplier", 1.0, 5.0, value=float(prefill.peak_multiplier) if prefill else 2.5, step=0.1, help="How many times busier rush hour is vs baseline.")
+        with v3:
+            noise = st.slider("Volume Noise", 0.0, 0.50, value=float(prefill.volume_noise_std) if prefill else 0.15, step=0.01, help="0 = deterministic Poisson, higher = more randomness.")
+        with v4:
+            ns_ew = st.slider("N/S vs E/W Ratio", 0.5, 2.0, value=float(prefill.ns_ew_ratio) if prefill else 1.0, step=0.05, help=">1 means more N/S traffic, <1 means more E/W traffic.")
+
+        # ── Section 4: Temporal ──────────────────────────────────────────
+        st.markdown('<div class="studio-section-header">4 · Temporal Patterns</div>', unsafe_allow_html=True)
+        t0_col, t1_col = st.columns(2)
+        with t0_col:
+            demand_profile = st.selectbox(
+                "Demand Profile",
+                ALL_DEMAND_PROFILES,
+                index=ALL_DEMAND_PROFILES.index(prefill.demand_profile) if prefill and prefill.demand_profile in ALL_DEMAND_PROFILES else 1,
+                help="Underlying DemandModel profile that shapes the arrival rate pattern.",
+            )
+            morning_center = st.slider("Morning Rush Center (hour)", 5.0, 10.0, value=float(prefill.morning_rush_center) if prefill else 8.0, step=0.25)
+            morning_width = st.slider("Morning Rush Width (σ hours)", 0.5, 3.0, value=float(prefill.morning_rush_width) if prefill else 1.5, step=0.25)
+        with t1_col:
+            weekend_red = st.slider("Weekend Reduction", 0.3, 1.0, value=float(prefill.weekend_reduction) if prefill else 0.7, step=0.05, help="Fraction of weekday volume on weekends.")
+            evening_center = st.slider("Evening Rush Center (hour)", 15.0, 20.0, value=float(prefill.evening_rush_center) if prefill else 17.5, step=0.25)
+            evening_width = st.slider("Evening Rush Width (σ hours)", 0.5, 3.0, value=float(prefill.evening_rush_width) if prefill else 1.5, step=0.25)
+            overnight_min = st.slider("Overnight Minimum", 0.05, 0.40, value=float(prefill.overnight_min) if prefill else 0.15, step=0.01, help="Fraction of base rate at 2–5am.")
+
+        # ── Section 5: Scenarios ─────────────────────────────────────────
+        st.markdown('<div class="studio-section-header">5 · Special Scenarios</div>', unsafe_allow_html=True)
+        s1, s2 = st.columns(2)
+        with s1:
+            inc = st.toggle("Random Incidents", value=bool(prefill.include_incidents) if prefill else False, help="Inject random capacity drops (queue spike ×3, speed ×0.4).")
+            if inc:
+                inc_freq = st.slider("Incident freq/day", 0.1, 3.0, value=float(prefill.incident_frequency_per_day) if prefill else 0.5, step=0.1)
+            else:
+                inc_freq = 0.5
+            wx = st.toggle("Weather Effects", value=bool(prefill.include_weather) if prefill else False, help="Rain blocks: volume ×1.3, speed ×0.85.")
+            if wx:
+                wx_freq = st.slider("Weather freq/day", 0.1, 3.0, value=float(prefill.weather_frequency_per_day) if prefill else 0.3, step=0.1)
+            else:
+                wx_freq = 0.3
+            ev = st.toggle("Event Surges", value=bool(prefill.include_events) if prefill else False, help="Stadium/concert: ×4 volume pre-event, ×3.5 post-event.")
+            if ev:
+                ev_hour = st.slider("Event Hour", 14.0, 23.0, value=float(prefill.event_hour) if prefill else 19.0, step=0.5)
+            else:
+                ev_hour = 19.0
+        with s2:
+            school = st.toggle("School Zone Patterns", value=bool(prefill.include_school_zones) if prefill else False, help="N/S surge 7:30–8:15am and 2:45–3:30pm.")
+            emrg = st.toggle("Emergency Vehicles", value=bool(prefill.include_emergency_vehicles) if prefill else False, help="Random clearance events (brief N/S drop + speed boost).")
+            if emrg:
+                emrg_freq = st.slider("Emergency freq/day", 0.5, 5.0, value=float(prefill.emergency_frequency_per_day) if prefill else 2.0, step=0.5)
+            else:
+                emrg_freq = 2.0
+            compliance = st.slider(
+                "Signal Compliance Rate",
+                0.5, 1.0,
+                value=float(prefill.signal_compliance_rate) if prefill else 1.0,
+                step=0.05,
+                help="1.0 = all vehicles obey signals. <1.0 models developing-world non-compliance.",
+            )
+
+        # ── Section 6: Labels ────────────────────────────────────────────
+        st.markdown('<div class="studio-section-header">6 · Label Strategy</div>', unsafe_allow_html=True)
+        strategy_opts = list(_LABEL_STRATEGY_DESCRIPTIONS.keys())
+        label_strat = st.radio(
+            "Label Strategy",
+            strategy_opts,
+            index=strategy_opts.index(prefill.label_strategy) if prefill and prefill.label_strategy in strategy_opts else 0,
+            format_func=lambda s: {"optimal": "Optimal (simulation-based)", "queue_balance": "Queue Balance (heuristic)", "fixed": "Fixed Alternating", "adaptive_rule": "Adaptive Rule"}[s],
+            horizontal=True,
+        )
+        st.caption(_LABEL_STRATEGY_DESCRIPTIONS[label_strat])
+
+        # Estimate generation time
+        est_sec = n_samples * (0.01 if label_strat == "optimal" else 0.001)
+        st.caption(f"Estimated generation time: ~{est_sec:.1f}s")
+
+        # ── Section 7: Preview & Generate ───────────────────────────────
+        st.markdown('<div class="studio-section-header">7 · Preview & Generate</div>', unsafe_allow_html=True)
+
+        def _build_config() -> SyntheticDatasetConfig:
+            return SyntheticDatasetConfig(
+                name=ds_name or "untitled",
+                description=ds_desc,
+                n_samples=n_samples,
+                time_span_days=time_span,
+                sampling_interval_minutes=int(interval),
+                seed=int(seed),
+                n_intersections=grid_rows * grid_cols,
+                lanes_per_direction=lanes,
+                grid_rows=grid_rows,
+                grid_cols=grid_cols,
+                base_arrival_rate=base_rate,
+                peak_multiplier=peak_mult,
+                volume_noise_std=noise,
+                morning_rush_center=morning_center,
+                morning_rush_width=morning_width,
+                evening_rush_center=evening_center,
+                evening_rush_width=evening_width,
+                weekend_reduction=weekend_red,
+                overnight_min=overnight_min,
+                demand_profile=demand_profile,
+                include_incidents=inc,
+                incident_frequency_per_day=inc_freq,
+                include_weather=wx,
+                weather_frequency_per_day=wx_freq,
+                include_events=ev,
+                event_hour=ev_hour,
+                include_school_zones=school,
+                include_emergency_vehicles=emrg,
+                emergency_frequency_per_day=emrg_freq,
+                signal_compliance_rate=compliance,
+                ns_ew_ratio=ns_ew,
+                label_strategy=label_strat,
+            )
+
+        import dataclasses as _dc
+        import plotly.express as px
+
+        prev_col, gen_col = st.columns(2)
+        with prev_col:
+            if st.button("Preview (500 rows)", use_container_width=True):
+                preview_cfg = _dc.replace(_build_config(), n_samples=500)
+                with st.spinner("Generating preview…"):
+                    gen = SyntheticDatasetGenerator(preview_cfg)
+                    result = gen.generate()
+                pf = result.dataframe
+                balance = result.metadata.get("class_balance", {})
+                ns_p = float(balance.get("0", balance.get(0, 0.5)))
+                st.caption(f"Preview: {len(pf):,} rows · NS {ns_p*100:.0f}% / EW {(1-ns_p)*100:.0f}%")
+
+                pc1, pc2, pc3 = st.columns(3)
+                with pc1:
+                    if "hour_of_day" in pf.columns:
+                        fig_ts = px.line(
+                            pf.groupby("hour_of_day")["vehicle_count"].mean().reset_index(),
+                            x="hour_of_day", y="vehicle_count",
+                            labels={"hour_of_day": "Hour", "vehicle_count": "Vehicles"},
+                            template="plotly_dark", title="Volume by Hour",
+                        )
+                        fig_ts.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5,r=5,t=28,b=5), height=180, title_font_size=11)
+                        st.plotly_chart(fig_ts, use_container_width=True)
+                with pc2:
+                    if "queue_length" in pf.columns:
+                        fig_hist = px.histogram(pf, x="queue_length", nbins=25, template="plotly_dark",
+                                                color_discrete_sequence=["#38bdf8"], title="Queue Distribution")
+                        fig_hist.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=5,r=5,t=28,b=5), height=180, showlegend=False, title_font_size=11)
+                        st.plotly_chart(fig_hist, use_container_width=True)
+                with pc3:
+                    if "optimal_phase" in pf.columns:
+                        pie_data = pf["optimal_phase"].value_counts().rename({0: "NS Green", 1: "EW Green"})
+                        fig_pie = px.pie(values=pie_data.values, names=pie_data.index, template="plotly_dark",
+                                         color_discrete_sequence=["#38bdf8", "#fbbf24"], title="Label Split")
+                        fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=5,r=5,t=28,b=5), height=180, title_font_size=11)
+                        st.plotly_chart(fig_pie, use_container_width=True)
+
+                num_cols = pf.select_dtypes("number").columns.tolist()
+                if num_cols:
+                    st.dataframe(pf[num_cols].describe().round(2), use_container_width=True, height=140)
+
+        with gen_col:
+            if st.button("Generate Dataset", type="primary", use_container_width=True):
+                if not ds_name.strip():
+                    st.error("Please enter a dataset name.")
+                else:
+                    store = _studio_store(settings)
+                    if store.exists(ds_name.strip()):
+                        st.warning(f"A dataset named '{ds_name}' already exists. Choose a different name or delete the existing one.")
+                    else:
+                        cfg_obj = _build_config()
+                        progress_bar = st.progress(0.0, text="Initializing…")
+
+                        def _prog(frac: float, msg: str) -> None:
+                            progress_bar.progress(min(frac, 1.0), text=msg)
+
+                        with st.spinner("Generating…"):
+                            gen = SyntheticDatasetGenerator(cfg_obj)
+                            result = gen.generate(progress_callback=_prog)
+                        progress_bar.progress(1.0, text="Saving…")
+                        store.save(ds_name.strip(), result)
+                        _refresh_studio_datasets(settings)
+                        st.session_state["studio_show_generator"] = False
+                        st.session_state["studio_generator_config"] = None
+                        st.session_state["studio_active_dataset"] = ds_name.strip()
+                        st.session_state["studio_just_generated"] = ds_name.strip()
+                        st.session_state["studio_train_dataset"] = ds_name.strip()
+                        progress_bar.empty()
+                        st.toast(f"Dataset '{ds_name}' generated: {len(result.dataframe):,} rows in {result.generation_time_seconds:.1f}s")
+                        st.rerun()
+
+
+def _render_training_workbench(settings: Settings) -> None:
+    """4D — Training workbench."""
+    import plotly.graph_objects as go
+
+    st.markdown('<div class="studio-section-header">Training Workbench</div>', unsafe_allow_html=True)
+
+    datasets = st.session_state.get("studio_datasets") or _refresh_studio_datasets(settings)
+    if not datasets:
+        st.info("No datasets available. Generate one above first.")
+        return
+
+    wc1, wc2 = st.columns(2)
+    with wc1:
+        ctrl_keys = list(_STUDIO_CTRL_LABELS.keys())
+        ctrl_labels = [_STUDIO_CTRL_LABELS[k] for k in ctrl_keys]
+        default_ctrl_idx = 0
+        ctrl_idx = st.selectbox("Controller", range(len(ctrl_keys)), format_func=lambda i: ctrl_labels[i], index=default_ctrl_idx, key="studio_ctrl_sel")
+        selected_ctrl = ctrl_keys[ctrl_idx]
+
+    with wc2:
+        ds_names = [ds["name"] for ds in datasets]
+        presel = st.session_state.get("studio_train_dataset", ds_names[0] if ds_names else "")
+        try:
+            ds_idx = ds_names.index(presel) if presel in ds_names else 0
+        except ValueError:
+            ds_idx = 0
+        selected_ds = st.selectbox("Dataset", ds_names, index=ds_idx, key="studio_ds_sel")
+        # Compact dataset summary
+        ds_meta = next((d for d in datasets if d["name"] == selected_ds), None)
+        if ds_meta:
+            balance = ds_meta.get("class_balance", {})
+            ns_p = float(balance.get("0", balance.get(0, 0.5)))
+            st.markdown(
+                f"<div style='font-size:0.78rem;color:#7ab0c8;margin-top:0.2rem;'>"
+                f"<b>{ds_meta.get('rows',0):,}</b> rows &nbsp;·&nbsp; "
+                f"<b>{ds_meta.get('demand_profile','—')}</b> &nbsp;·&nbsp; "
+                f"NS {ns_p*100:.0f}% / EW {(1-ns_p)*100:.0f}% &nbsp;·&nbsp; "
+                f"{ds_meta.get('label_strategy','—')} labels"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # Controller info card
+    ctrl_display = _STUDIO_CTRL_LABELS.get(selected_ctrl, selected_ctrl)
+    if ctrl_display in CONTROLLER_INFO:
+        info = CONTROLLER_INFO[ctrl_display]
+        st.markdown(
+            f"""
+            <div class="ctrl-info-card">
+                <div class="card-title">{ctrl_display}
+                    <span class="ctrl-badge {info['badge_class']}">{info['badge']}</span>
+                </div>
+                <div class="card-summary">{info['summary']}</div>
+                <div class="card-label">How it works</div>
+                <div class="card-detail">{info['details']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Training config
+    st.markdown('<div class="studio-section-header">Training Config</div>', unsafe_allow_html=True)
+    is_rl = selected_ctrl in {"q_learning", "dqn", "policy_gradient", "a2c", "sac", "recurrent_ppo"}
+    tc1, tc2, tc3 = st.columns(3)
+    train_cfg: dict = {}
+    if is_rl:
+        with tc1:
+            train_cfg["episodes"] = st.slider("Episodes", 10, 500, value=50, step=10, key="studio_episodes")
+        with tc2:
+            train_cfg["lr"] = st.number_input("Learning Rate", value=1e-3, format="%.4f", step=1e-4, key="studio_lr")
+        with tc3:
+            train_cfg["batch_size"] = st.selectbox("Batch Size", [32, 64, 128, 256], index=2, key="studio_batch")
+    else:
+        with tc1:
+            if selected_ctrl == "random_forest":
+                train_cfg["n_estimators"] = st.slider("N Estimators", 10, 300, value=100, step=10, key="studio_n_est")
+        with tc2:
+            train_cfg["cv_folds"] = st.slider("CV Folds", 2, 10, value=3, step=1, key="studio_cv")
+        with tc3:
+            pass
+
+    use_defaults = st.button("Use Defaults", key="studio_defaults")
+    if use_defaults:
+        train_cfg = {}
+
+    if st.button("Start Training", type="primary", use_container_width=True, key="studio_train_btn"):
+        store = _studio_store(settings)
+        try:
+            df, _, _ = store.load(selected_ds)
+        except Exception as exc:
+            st.error(f"Could not load dataset: {exc}")
+            return
+
+        from traffic_ai.training.trainer import ModelTrainer
+
+        trainer = ModelTrainer()
+        status_box = st.status(f"Training {ctrl_display} on '{selected_ds}'…", expanded=True)
+        prog_bar = st.progress(0.0)
+
+        def _train_prog(frac: float, msg: str) -> None:
+            prog_bar.progress(min(frac, 1.0))
+            status_box.write(msg)
+
+        try:
+            result = trainer.train(
+                controller_type=selected_ctrl,
+                dataset=df,
+                config=train_cfg,
+                settings=settings,
+                progress_callback=_train_prog,
+            )
+            st.session_state["studio_training_result"] = result
+            # Accumulate history for model comparison
+            history: list = st.session_state.get("studio_training_history", [])
+            history.append({"label": f"{result.controller_name} ({selected_ds[:12]})", "result": result})
+            st.session_state["studio_training_history"] = history[-8:]  # keep last 8
+            status_box.update(label="Training complete!", state="complete")
+            prog_bar.progress(1.0)
+        except Exception as exc:
+            status_box.update(label=f"Training failed: {exc}", state="error")
+            st.error(str(exc))
+            return
+
+        # Results panel
+        st.markdown('<div class="studio-section-header">Training Results</div>', unsafe_allow_html=True)
+        r = result
+        rm1, rm2, rm3, rm4 = st.columns(4)
+        rm1.metric("Controller", r.controller_name)
+        rm2.metric("Training Time", f"{r.training_time_seconds:.1f}s")
+        if r.final_accuracy is not None:
+            rm3.metric("Test Accuracy", f"{r.final_accuracy*100:.1f}%")
+        if r.evaluation_metrics:
+            avg_r = r.evaluation_metrics.get("avg_episode_reward", r.evaluation_metrics.get("cv_mean_accuracy"))
+            if avg_r is not None:
+                rm4.metric("Avg Reward / CV Acc", f"{avg_r:.3f}")
+
+        if r.reward_history:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(y=r.reward_history, mode="lines", line=dict(color="#38bdf8", width=1.5), name="Episode Reward"))
+            fig.update_layout(
+                template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=10, r=10, t=10, b=10), height=220,
+                xaxis_title="Episode", yaxis_title="Reward",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        if r.evaluation_metrics:
+            st.json(r.evaluation_metrics)
+
+        for key_m, label_m in [("cv_mean_accuracy", "CV Mean Accuracy"), ("cv_std", "CV Std"), ("test_accuracy", "Test Accuracy")]:
+            if key_m in r.evaluation_metrics:
+                st.metric(label_m, f"{r.evaluation_metrics[key_m]*100:.1f}%")
+
+        # Post-training action buttons
+        act1, act2 = st.columns(2)
+        with act1:
+            if st.button("Save Model", key="studio_save_model", use_container_width=True):
+                import pickle
+                models_dir = settings.output_dir / "models"
+                models_dir.mkdir(parents=True, exist_ok=True)
+                safe_ctrl = r.controller_name.replace(" ", "_").lower()
+                model_path = models_dir / f"studio_{safe_ctrl}_{selected_ds[:20]}.pkl"
+                with open(model_path, "wb") as fh:
+                    pickle.dump(r, fh)
+                st.toast(f"Saved to {model_path.name}")
+        with act2:
+            st.info("Switch to the **Live Simulation** tab to run this controller in real-time.", icon="🎮")
+
+
+def _render_model_comparison() -> None:
+    """4E — Multi-model comparison: table, radar chart, Mann-Whitney U, recommendation."""
+    import plotly.graph_objects as go
+    import numpy as np
+
+    st.markdown('<div class="studio-section-header">Compare Models</div>', unsafe_allow_html=True)
+
+    history: list[dict] = st.session_state.get("studio_training_history", [])
+    if not history:
+        st.info("Train at least one model above to see comparison. Train multiple to compare side-by-side.")
+        return
+
+    labels = [h["label"] for h in history]
+    selected_labels = st.multiselect(
+        "Select models to compare (2–5)",
+        labels,
+        default=labels[-min(len(labels), 3):],
+        key="studio_compare_sel",
+    )
+    if not selected_labels:
+        return
+
+    selected = [h for h in history if h["label"] in selected_labels]
+
+    # Collect all metric keys present in any result
+    all_metric_keys: list[str] = []
+    for h in selected:
+        for k in (h["result"].evaluation_metrics or {}):
+            if k not in all_metric_keys:
+                all_metric_keys.append(k)
+
+    if not all_metric_keys:
+        st.caption("No evaluation metrics available for selected models.")
+        return
+
+    # Side-by-side comparison table
+    st.markdown("**Side-by-side Metrics**")
+    import pandas as pd
+    rows = []
+    for h in selected:
+        m = h["result"].evaluation_metrics or {}
+        row = {"Model": h["label"]}
+        for k in all_metric_keys:
+            row[k] = round(float(m.get(k, float("nan"))), 4)
+        if h["result"].final_accuracy is not None:
+            row["test_accuracy"] = round(h["result"].final_accuracy, 4)
+        row["training_time_s"] = round(h["result"].training_time_seconds, 1)
+        rows.append(row)
+    cmp_df = pd.DataFrame(rows).set_index("Model")
+    st.dataframe(cmp_df, use_container_width=True)
+
+    # Radar chart (normalise each metric 0→1 across selected models)
+    radar_metrics = [k for k in all_metric_keys if not any(v != v for h in selected for v in [h["result"].evaluation_metrics.get(k, float("nan"))])]
+    if len(radar_metrics) >= 3 and len(selected) >= 2:
+        st.markdown("**Strengths & Weaknesses — Radar Chart**")
+        vals_matrix: list[list[float]] = []
+        for h in selected:
+            m = h["result"].evaluation_metrics or {}
+            vals_matrix.append([float(m.get(k, 0.0)) for k in radar_metrics])
+
+        arr = np.array(vals_matrix, dtype=float)
+        col_min = arr.min(axis=0)
+        col_max = arr.max(axis=0)
+        col_range = np.where(col_max - col_min < 1e-9, 1.0, col_max - col_min)
+        arr_norm = (arr - col_min) / col_range  # 0..1
+
+        colors = ["#38bdf8", "#fbbf24", "#34d399", "#f87171", "#a78bfa", "#fb923c", "#e879f9", "#4ade80"]
+        fig_radar = go.Figure()
+        for i, h in enumerate(selected):
+            vals = arr_norm[i].tolist()
+            vals_closed = vals + [vals[0]]
+            cats_closed = radar_metrics + [radar_metrics[0]]
+            fig_radar.add_trace(go.Scatterpolar(
+                r=vals_closed,
+                theta=cats_closed,
+                fill="toself",
+                name=h["label"],
+                line=dict(color=colors[i % len(colors)]),
+                opacity=0.75,
+            ))
+        fig_radar.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=20, b=20),
+            height=300,
+            legend=dict(font=dict(size=10)),
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+    # Mann-Whitney U pairwise significance tests
+    if len(selected) >= 2:
+        st.markdown("**Pairwise Significance — Mann-Whitney U**")
+        try:
+            from scipy.stats import mannwhitneyu
+            sig_rows = []
+            for i in range(len(selected)):
+                for j in range(i + 1, len(selected)):
+                    ri = selected[i]["result"]
+                    rj = selected[j]["result"]
+                    a_vals = ri.reward_history or ([ri.final_accuracy] if ri.final_accuracy else [])
+                    b_vals = rj.reward_history or ([rj.final_accuracy] if rj.final_accuracy else [])
+                    if len(a_vals) >= 2 and len(b_vals) >= 2:
+                        stat, p = mannwhitneyu(a_vals, b_vals, alternative="two-sided")
+                        sig_rows.append({
+                            "Model A": selected[i]["label"],
+                            "Model B": selected[j]["label"],
+                            "U statistic": round(stat, 1),
+                            "p-value": round(p, 4),
+                            "Significant (α=0.05)": "✓ Yes" if p < 0.05 else "✗ No",
+                        })
+            if sig_rows:
+                st.dataframe(pd.DataFrame(sig_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("Need ≥2 reward/accuracy data points per model for significance testing (RL reward history satisfies this; ML needs multiple CV fold results).")
+        except ImportError:
+            st.caption("Install scipy for significance tests: `pip install scipy`")
+
+    # "Which model is best?" recommendation
+    st.markdown("**Which model is best for your scenario?**")
+    best_label = None
+    best_score = float("-inf")
+    for h in selected:
+        m = h["result"].evaluation_metrics or {}
+        # Higher reward / higher accuracy = better; lower queue = better
+        score = 0.0
+        if "avg_episode_reward" in m:
+            score += float(m["avg_episode_reward"])
+        if "test_accuracy" in m:
+            score += float(m["test_accuracy"]) * 10
+        if "cv_mean_accuracy" in m:
+            score += float(m["cv_mean_accuracy"]) * 10
+        if "avg_queue_length" in m:
+            score -= float(m["avg_queue_length"]) * 0.5
+        if score > best_score:
+            best_score = score
+            best_label = h["label"]
+
+    if best_label:
+        st.markdown(
+            f"<div style='background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.3);"
+            f"border-radius:10px;padding:0.8rem 1rem;'>"
+            f"<span style='color:#38bdf8;font-weight:600;'>Recommendation:</span> "
+            f"<span style='color:#dff0fa;'><b>{best_label}</b> scores highest across reward, "
+            f"accuracy, and queue metrics for this dataset.</span></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_data_studio(settings: Settings) -> None:
+    """Main Data Studio page renderer."""
+    # Init session state
+    if "studio_datasets" not in st.session_state:
+        _refresh_studio_datasets(settings)
+    if "studio_show_generator" not in st.session_state:
+        st.session_state["studio_show_generator"] = False
+    if "studio_training_history" not in st.session_state:
+        st.session_state["studio_training_history"] = []
+
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-title">Synthetic Data Studio</div>
+            <div class="hero-sub">Design, generate, and train on custom synthetic traffic datasets.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 4A — Dataset Manager
+    _render_dataset_manager(settings)
+
+    # Refresh button
+    rc1, rc2 = st.columns([1, 8])
+    with rc1:
+        if st.button("⟳ Refresh", key="studio_refresh"):
+            _refresh_studio_datasets(settings)
+            st.rerun()
+    with rc2:
+        if st.button("+ Create New Dataset", key="studio_new_btn"):
+            st.session_state["studio_show_generator"] = True
+            st.session_state["studio_generator_config"] = None
+            st.rerun()
+
+    st.divider()
+
+    # 4C — Dataset Detail (when a dataset is selected)
+    if st.session_state.get("studio_active_dataset"):
+        _render_dataset_detail(settings)
+        st.divider()
+
+    # 4B — Generator
+    _render_generator_panel(settings)
+
+    # "Train a Model on This Dataset →" CTA shown immediately after generation
+    just_gen = st.session_state.get("studio_just_generated")
+    if just_gen:
+        st.success(
+            f"Dataset **{just_gen}** is ready! Scroll down to the Training Workbench and click **Start Training**."
+        )
+        if st.button("Train a Model on This Dataset →", type="primary", key="post_gen_train_cta"):
+            st.session_state.pop("studio_just_generated", None)
+            st.rerun()
+
+    st.divider()
+
+    # 4D — Training Workbench
+    _render_training_workbench(settings)
+
+    st.divider()
+
+    # 4E — Compare
+    _render_model_comparison()
+
+
+# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
@@ -2059,6 +3010,14 @@ def _render_sidebar(settings: Settings) -> tuple[bool, bool, bool, bool, bool]:
         st.caption(f"Artifacts: `{settings.output_dir}`")
 
         st.divider()
+
+        st.markdown(
+            "<div style='text-align:center;padding:0.2rem 0 0.1rem;'>"
+            "<span style='color:#38bdf8;font-size:0.85rem;font-weight:600;'>📊 Data Studio</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Click the **Data Studio** tab above to design, generate, and train on custom synthetic datasets.")
 
         with st.expander("About This Research", expanded=False):
             st.markdown(
@@ -2147,8 +3106,8 @@ def run_dashboard() -> None:
     source_label = st.session_state.get("dashboard_source")
     _render_header(source_label)
 
-    benchmark_tab, simulation_tab, grid_tab = st.tabs(
-        ["Benchmark Lab", "Live Simulation", "Grid Playground"]
+    benchmark_tab, simulation_tab, grid_tab, studio_tab = st.tabs(
+        ["Benchmark Lab", "Live Simulation", "Grid Playground", "Data Studio"]
     )
 
     with benchmark_tab:
@@ -2163,6 +3122,9 @@ def run_dashboard() -> None:
 
     with grid_tab:
         _render_grid_simulation_panel(settings)
+
+    with studio_tab:
+        _render_data_studio(settings)
 
 
 if __name__ == "__main__":
