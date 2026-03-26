@@ -300,20 +300,30 @@ def _inject_custom_theme() -> None:
         .stButton > button {
             border-radius: 8px;
             border: 1px solid rgba(56, 189, 248, 0.25);
-            color: var(--ink);
+            background: rgba(18, 34, 50, 0.75) !important;
+            color: var(--ink) !important;
             transition: all 0.2s;
         }
 
         .stButton > button:hover {
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+            background: rgba(28, 48, 68, 0.90) !important;
+            color: var(--ink) !important;
+            border-color: rgba(56, 189, 248, 0.45) !important;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
             transform: translateY(-1px);
         }
 
         .stButton > button[kind="primary"] {
-            background: linear-gradient(135deg, var(--accent) 0%, #1e9fd4 100%);
-            color: #0d1b2a;
+            background: linear-gradient(135deg, var(--accent) 0%, #1e9fd4 100%) !important;
+            color: #0d1b2a !important;
             font-weight: 600;
-            border: none;
+            border: none !important;
+        }
+
+        .stButton > button[kind="primary"]:hover {
+            background: linear-gradient(135deg, #5ecfff 0%, #2ab0e8 100%) !important;
+            color: #0d1b2a !important;
+            transform: translateY(-1px);
         }
 
         .hero {
