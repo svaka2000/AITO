@@ -21,7 +21,7 @@ import os
 import re
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -88,13 +88,11 @@ class DatasetStore:
     # CRUD
     # ------------------------------------------------------------------
 
+    # -------------------------------------------------------------------------
+    # Orchestrator: prepares the directory then delegates each file write.
+    # -------------------------------------------------------------------------
     def save(self, name: str, result: SyntheticDatasetResult) -> Path:
-        """Persist a generated dataset to disk.
-
-        Writes three files atomically:
-        - ``data.csv``     — the full DataFrame
-        - ``config.json``  — the generation config
-        - ``metadata.json`` — row count, class balance, timestamps, etc.
+        """Persists a generated dataset to disk as three atomic files.
 
         Parameters
         ----------
@@ -108,24 +106,17 @@ class DatasetStore:
         Path
             Directory path where the dataset was saved.
         """
-        safe = self._safe_name(name)
-        dataset_dir = self.base_dir / safe
-        dataset_dir.mkdir(parents=True, exist_ok=True)
-
-        _write_csv_atomic(result.dataframe, dataset_dir / "data.csv")
-
-        config_dict = dataclasses.asdict(result.config)
-        _write_json_atomic(config_dict, dataset_dir / "config.json")
-
-        metadata = dict(result.metadata)
-        metadata["saved_at"] = datetime.utcnow().isoformat()
-        metadata["safe_name"] = safe
-        _write_json_atomic(metadata, dataset_dir / "metadata.json")
-
+        dataset_dir = self._prepare_dataset_dir(name)
+        self._write_data_csv(result.dataframe, dataset_dir)
+        self._write_config_json(result.config, dataset_dir)
+        self._write_metadata_json(result.metadata, name, dataset_dir)
         return dataset_dir
 
+    # -------------------------------------------------------------------------
+    # Orchestrator: scans base_dir and builds a summary for each valid dataset.
+    # -------------------------------------------------------------------------
     def list_datasets(self) -> list[dict[str, Any]]:
-        """Return a list of summary dicts for every saved dataset.
+        """Returns a list of summary dicts for every saved dataset.
 
         Each summary contains: ``name``, ``safe_name``, ``rows``,
         ``description``, ``demand_profile``, ``label_strategy``,
@@ -138,30 +129,9 @@ class DatasetStore:
         for d in sorted(self.base_dir.iterdir()):
             if not d.is_dir():
                 continue
-            meta_path = d / "metadata.json"
-            cfg_path = d / "config.json"
-            if not meta_path.exists() or not cfg_path.exists():
-                continue
-            try:
-                meta = _read_json(meta_path)
-                cfg = _read_json(cfg_path)
-                summaries.append(
-                    {
-                        "name": cfg.get("name", d.name),
-                        "safe_name": d.name,
-                        "description": cfg.get("description", ""),
-                        "rows": meta.get("rows", 0),
-                        "demand_profile": meta.get("demand_profile", "—"),
-                        "label_strategy": meta.get("label_strategy", "—"),
-                        "time_range_start": meta.get("time_range_start", ""),
-                        "time_range_end": meta.get("time_range_end", ""),
-                        "class_balance": meta.get("class_balance", {}),
-                        "saved_at": meta.get("saved_at", ""),
-                        "n_intersections": meta.get("n_intersections", "—"),
-                    }
-                )
-            except Exception:
-                continue
+            summary = self._load_dataset_summary(d)
+            if summary is not None:
+                summaries.append(summary)
         return summaries
 
     def load(
@@ -213,12 +183,7 @@ class DatasetStore:
             if dst.exists():
                 return False
             src.rename(dst)
-            # Update the name field inside config.json
-            cfg_path = dst / "config.json"
-            if cfg_path.exists():
-                cfg_data = _read_json(cfg_path)
-                cfg_data["name"] = new_name
-                _write_json_atomic(cfg_data, cfg_path)
+            self._patch_config_name(dst, new_name)
             return True
         except (FileNotFoundError, ValueError):
             return False
@@ -237,17 +202,8 @@ class DatasetStore:
             if dst.exists():
                 return False
             shutil.copytree(src, dst)
-            cfg_path = dst / "config.json"
-            if cfg_path.exists():
-                cfg_data = _read_json(cfg_path)
-                cfg_data["name"] = new_name
-                _write_json_atomic(cfg_data, cfg_path)
-            meta_path = dst / "metadata.json"
-            if meta_path.exists():
-                meta = _read_json(meta_path)
-                meta["saved_at"] = datetime.utcnow().isoformat()
-                meta["safe_name"] = self._safe_name(new_name)
-                _write_json_atomic(meta, meta_path)
+            self._patch_config_name(dst, new_name)
+            self._patch_duplicate_metadata(dst, new_name)
             return True
         except (FileNotFoundError, ValueError):
             return False
@@ -283,6 +239,96 @@ class DatasetStore:
             return True
         except (FileNotFoundError, ValueError):
             return False
+
+    # ------------------------------------------------------------------
+    # SRP workers — called only by orchestrators above
+    # ------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # SRP: Creates (or verifies) the filesystem directory for one dataset.
+    # -------------------------------------------------------------------------
+    def _prepare_dataset_dir(self, name: str) -> Path:
+        """Returns the dataset subdirectory path, creating it if necessary."""
+        dataset_dir = self.base_dir / self._safe_name(name)
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        return dataset_dir
+
+    # -------------------------------------------------------------------------
+    # SRP: Atomically writes the DataFrame rows to data.csv.
+    # -------------------------------------------------------------------------
+    def _write_data_csv(self, df: pd.DataFrame, dataset_dir: Path) -> None:
+        """Serialises the traffic DataFrame to disk using an atomic write."""
+        _write_csv_atomic(df, dataset_dir / "data.csv")
+
+    # -------------------------------------------------------------------------
+    # SRP: Atomically serialises the generation config to config.json.
+    # -------------------------------------------------------------------------
+    def _write_config_json(self, config: SyntheticDatasetConfig, dataset_dir: Path) -> None:
+        """Converts the dataclass config to a dict and writes it atomically."""
+        _write_json_atomic(dataclasses.asdict(config), dataset_dir / "config.json")
+
+    # -------------------------------------------------------------------------
+    # SRP: Stamps provenance fields and atomically writes metadata.json.
+    # -------------------------------------------------------------------------
+    def _write_metadata_json(
+        self, metadata: dict[str, Any], name: str, dataset_dir: Path
+    ) -> None:
+        """Adds saved_at timestamp and safe_name to metadata, then writes atomically."""
+        meta = dict(metadata)
+        meta["saved_at"] = datetime.now(timezone.utc).isoformat()
+        meta["safe_name"] = self._safe_name(name)
+        _write_json_atomic(meta, dataset_dir / "metadata.json")
+
+    # -------------------------------------------------------------------------
+    # SRP: Loads metadata + config for one directory into a flat summary dict.
+    # -------------------------------------------------------------------------
+    def _load_dataset_summary(self, dataset_dir: Path) -> dict[str, Any] | None:
+        """Reads meta + config for one dataset; returns None if files are missing or corrupt."""
+        meta_path = dataset_dir / "metadata.json"
+        cfg_path = dataset_dir / "config.json"
+        if not meta_path.exists() or not cfg_path.exists():
+            return None
+        try:
+            meta = _read_json(meta_path)
+            cfg = _read_json(cfg_path)
+            return {
+                "name": cfg.get("name", dataset_dir.name),
+                "safe_name": dataset_dir.name,
+                "description": cfg.get("description", ""),
+                "rows": meta.get("rows", 0),
+                "demand_profile": meta.get("demand_profile", "—"),
+                "label_strategy": meta.get("label_strategy", "—"),
+                "time_range_start": meta.get("time_range_start", ""),
+                "time_range_end": meta.get("time_range_end", ""),
+                "class_balance": meta.get("class_balance", {}),
+                "saved_at": meta.get("saved_at", ""),
+                "n_intersections": meta.get("n_intersections", "—"),
+            }
+        except Exception:
+            return None
+
+    # -------------------------------------------------------------------------
+    # SRP: Updates the 'name' field inside config.json after a rename or duplicate.
+    # -------------------------------------------------------------------------
+    def _patch_config_name(self, dataset_dir: Path, new_name: str) -> None:
+        """Rewrites config.json with the new human-readable name."""
+        cfg_path = dataset_dir / "config.json"
+        if cfg_path.exists():
+            cfg_data = _read_json(cfg_path)
+            cfg_data["name"] = new_name
+            _write_json_atomic(cfg_data, cfg_path)
+
+    # -------------------------------------------------------------------------
+    # SRP: Refreshes saved_at and safe_name in metadata.json after a duplicate.
+    # -------------------------------------------------------------------------
+    def _patch_duplicate_metadata(self, dataset_dir: Path, new_name: str) -> None:
+        """Stamps a fresh saved_at timestamp and updated safe_name into metadata.json."""
+        meta_path = dataset_dir / "metadata.json"
+        if meta_path.exists():
+            meta = _read_json(meta_path)
+            meta["saved_at"] = datetime.now(timezone.utc).isoformat()
+            meta["safe_name"] = self._safe_name(new_name)
+            _write_json_atomic(meta, meta_path)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -222,7 +222,7 @@ class ExperimentRunner:
         return significance, bootstrap, ablation
 
     # -------------------------------------------------------------------------
-    # SRP: Persists all result CSVs, generates all plots, and writes the run manifest.
+    # Orchestrator: delegates CSV writes, plot generation, and manifest writing.
     # -------------------------------------------------------------------------
     def _save_and_plot_artifacts(
         self,
@@ -235,7 +235,36 @@ class ExperimentRunner:
         rl_result: object,
         data_result: DataPipelineResult,
     ) -> ExperimentArtifacts:
-        """Writes all outputs to disk: CSVs, publication plots, and a JSON manifest."""
+        """Coordinates output persistence: delegates to CSV writer, plot generator, and manifest writer."""
+        csv_paths = self._save_result_csvs(
+            grouped_summary, all_steps, significance, bootstrap, ablation, supervised_metrics_df
+        )
+        generated_plots = self._generate_plots(grouped_summary, all_steps, rl_result, supervised_metrics_df)
+        self._write_run_manifest(data_result)
+
+        return ExperimentArtifacts(
+            summary_csv=csv_paths["summary"],
+            step_metrics_csv=csv_paths["steps"],
+            significance_csv=csv_paths["significance"],
+            ablation_csv=csv_paths["ablation"],
+            model_metrics_csv=csv_paths["model_metrics"],
+            generated_plots=generated_plots,
+            trained_model_dir=self.model_dir,
+        )
+
+    # -------------------------------------------------------------------------
+    # SRP: Writes every simulation result DataFrame to the results directory.
+    # -------------------------------------------------------------------------
+    def _save_result_csvs(
+        self,
+        grouped_summary: pd.DataFrame,
+        all_steps: pd.DataFrame,
+        significance: pd.DataFrame,
+        bootstrap: pd.DataFrame,
+        ablation: pd.DataFrame,
+        supervised_metrics_df: pd.DataFrame,
+    ) -> dict[str, Path]:
+        """Atomically writes all result CSVs; returns a dict of named Path objects."""
         summary_csv = write_dataframe(grouped_summary, self.result_dir / "controller_summary.csv")
         step_csv = write_dataframe(all_steps, self.result_dir / "controller_step_metrics.csv")
         significance_csv = write_dataframe(significance, self.result_dir / "significance_tests.csv")
@@ -244,19 +273,13 @@ class ExperimentRunner:
             supervised_metrics_df, self.result_dir / "supervised_model_metrics.csv"
         )
         write_dataframe(bootstrap, self.result_dir / "bootstrap_wait_time_ci.csv")
-
-        generated_plots = self._generate_plots(grouped_summary, all_steps, rl_result, supervised_metrics_df)
-        self._write_run_manifest(data_result)
-
-        return ExperimentArtifacts(
-            summary_csv=summary_csv,
-            step_metrics_csv=step_csv,
-            significance_csv=significance_csv,
-            ablation_csv=ablation_csv,
-            model_metrics_csv=model_metrics_csv,
-            generated_plots=generated_plots,
-            trained_model_dir=self.model_dir,
-        )
+        return {
+            "summary": summary_csv,
+            "steps": step_csv,
+            "significance": significance_csv,
+            "ablation": ablation_csv,
+            "model_metrics": model_metrics_csv,
+        }
 
     # -------------------------------------------------------------------------
     # SRP: Generates every publication-quality visualization for the experiment.
