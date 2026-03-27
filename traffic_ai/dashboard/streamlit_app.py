@@ -3007,8 +3007,6 @@ def _render_sidebar(settings: Settings) -> tuple[bool, bool, bool, bool, bool]:
             "Load Latest Artifacts",
             use_container_width=True,
         )
-        st.caption(f"Artifacts: `{settings.output_dir}`")
-
         st.divider()
 
         st.markdown(
