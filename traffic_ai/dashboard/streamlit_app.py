@@ -338,6 +338,22 @@ def _inject_custom_theme() -> None:
             transform: translateY(-1px);
         }
 
+        .stDownloadButton > button {
+            border-radius: 8px;
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            background: rgba(18, 34, 50, 0.75) !important;
+            color: var(--ink) !important;
+            transition: all 0.2s;
+        }
+
+        .stDownloadButton > button:hover {
+            background: rgba(28, 48, 68, 0.90) !important;
+            color: var(--ink) !important;
+            border-color: rgba(56, 189, 248, 0.45) !important;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+            transform: translateY(-1px);
+        }
+
         .hero {
             color: #ecf2f6;
             border-radius: 16px;
