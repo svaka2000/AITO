@@ -124,8 +124,10 @@ def train_dqn(
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
                 optimizer.step()
-                scheduler.step()
 
+        # Step the LR schedule once per episode (not per batch step) so cosine
+        # annealing decays smoothly from lr → lr/100 over the full training run.
+        scheduler.step()
         epsilon = max(epsilon_min, epsilon - epsilon_decay)
         rewards.append(float(total_reward))
         if episode % 10 == 0:
