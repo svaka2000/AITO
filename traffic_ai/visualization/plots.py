@@ -108,6 +108,15 @@ def plot_traffic_heatmap(step_df: pd.DataFrame, output_dir: Path) -> Path:
 def plot_learning_curves(rl_history_df: pd.DataFrame, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(12, 6))
+    if rl_history_df.empty or "episode" not in rl_history_df.columns:
+        ax.text(0.5, 0.5, "Pre-trained weights loaded — no training history available",
+                ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("RL Learning Curves")
+        fig.tight_layout()
+        target = output_dir / "rl_learning_curves.png"
+        fig.savefig(target, dpi=300)
+        plt.close(fig)
+        return target
     sns.lineplot(data=rl_history_df, x="episode", y="reward", hue="algorithm", ax=ax)
     ax.set_title("RL Learning Curves")
     ax.set_xlabel("Episode")

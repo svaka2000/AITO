@@ -61,6 +61,7 @@ def train_dqn(
     seed: int = 42,
     warmup: int = 1_000,
     reward_scale: float = 3.0,
+    n_train_seeds: int = 1,
 ) -> tuple[DQNPolicy, list[float], Any]:
     rng = np.random.default_rng(seed)
     if not TORCH_AVAILABLE:
@@ -89,6 +90,10 @@ def train_dqn(
     epsilon_decay = (epsilon - epsilon_min) / min(episodes, 500)
 
     for episode in range(episodes):
+        # Cycle through demand seeds so the policy generalises across the same
+        # range of seeds used in cross-validation (seed, seed+1, … seed+n-1).
+        if n_train_seeds > 1:
+            env._engine.config.seed = seed + (episode % n_train_seeds)
         state = env.reset()
         done = False
         total_reward = 0.0

@@ -43,8 +43,8 @@ data:
     date_to: "2024-01-22"     # default calibration window end (1 week)
 
 simulation:
-  steps: 2000
-  intersections: 4
+  steps: 500
+  intersections: 1
   lanes_per_direction: 2
   step_seconds: 1.0
   demand_profile: rush_hour
