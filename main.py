@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="AI Traffic Signal Optimization Research Platform"
+        description="AITO — AI Traffic Optimization | Professional Engineering Platform"
     )
     parser.add_argument(
         "--config",
@@ -59,6 +59,29 @@ def parse_args() -> argparse.Namespace:
             "Requires PEMS_API_KEY env var. Falls back to synthetic data when absent."
         ),
     )
+    parser.add_argument(
+        "--shadow-mode",
+        action="store_true",
+        help=(
+            "Run in shadow mode: production controller drives the simulation; "
+            "candidate controller logs counterfactual recommendations only. "
+            "Requires --shadow-production and --shadow-candidate."
+        ),
+    )
+    parser.add_argument(
+        "--shadow-production",
+        type=str,
+        default="fixed_timing",
+        metavar="CONTROLLER",
+        help="Production controller name for shadow mode (default: fixed_timing)",
+    )
+    parser.add_argument(
+        "--shadow-candidate",
+        type=str,
+        default="dqn",
+        metavar="CONTROLLER",
+        help="Candidate AI controller name for shadow mode (default: dqn)",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +106,69 @@ def _maybe_calibrate_from_pems(settings: object, pems_station: int | None) -> No
         logger.warning("PeMS calibration skipped: %s", exc)
 
 
+def _run_shadow_mode(args: argparse.Namespace, settings: object) -> None:
+    """Execute shadow mode and write report to artifacts/shadow_report.json."""
+    from traffic_ai.shadow.shadow_runner import ShadowModeRunner
+    from traffic_ai.simulation_engine.engine import SimulatorConfig
+
+    _CTRL_MAP: dict[str, type] = {}
+    try:
+        from traffic_ai.controllers.fixed import FixedTimingController
+        from traffic_ai.controllers.rule_based import RuleBasedController
+        from traffic_ai.controllers.rl_controllers import (
+            DQNController, PPOController, QLearningController,
+        )
+        _CTRL_MAP = {
+            "fixed_timing": FixedTimingController,
+            "rule_based": RuleBasedController,
+            "q_learning": QLearningController,
+            "dqn": DQNController,
+            "ppo": PPOController,
+        }
+    except ImportError as e:
+        logger.error("Could not import controllers for shadow mode: %s", e)
+        return
+
+    prod_name = args.shadow_production.lower()
+    cand_name = args.shadow_candidate.lower()
+
+    if prod_name not in _CTRL_MAP:
+        logger.error("Unknown production controller %r. Choose from: %s", prod_name, list(_CTRL_MAP))
+        return
+    if cand_name not in _CTRL_MAP:
+        logger.error("Unknown candidate controller %r. Choose from: %s", cand_name, list(_CTRL_MAP))
+        return
+
+    prod_ctrl = _CTRL_MAP[prod_name]()
+    cand_ctrl = _CTRL_MAP[cand_name]()
+
+    sim_steps = 300 if not getattr(args, "quick_run", False) else 60
+    cfg = SimulatorConfig(steps=sim_steps, intersections=4, seed=42)
+
+    logger.info("Shadow mode: production=%s, candidate=%s, steps=%d", prod_name, cand_name, sim_steps)
+    runner = ShadowModeRunner(production=prod_ctrl, candidate=cand_ctrl, config=cfg)
+    report = runner.run()
+
+    output_dir = Path(getattr(settings, "output_dir", "artifacts"))
+    report_path = output_dir / "shadow_report.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    runner.save_report(report, report_path)
+
+    logger.info(
+        "Shadow report saved to %s  |  agreement=%.1f%%  |  est_queue_reduction=%.1f%%",
+        report_path,
+        report.agreement_rate * 100,
+        report.estimated_queue_reduction_pct,
+    )
+    print(json.dumps({
+        "shadow_report": str(report_path),
+        "production_controller": report.production_controller,
+        "candidate_controller": report.candidate_controller,
+        "agreement_rate": report.agreement_rate,
+        "estimated_queue_reduction_pct": report.estimated_queue_reduction_pct,
+    }, indent=2))
+
+
 def main() -> None:
     args = parse_args()
     settings = load_settings(args.config)
@@ -90,6 +176,11 @@ def main() -> None:
         settings.payload["project"]["output_dir"] = args.output_dir
         settings.output_dir.mkdir(parents=True, exist_ok=True)
     set_global_seed(settings.seed)
+
+    # Shadow mode: run AI evaluation without touching production traffic
+    if args.shadow_mode:
+        _run_shadow_mode(args, settings)
+        return
 
     # Attempt PeMS demand calibration (falls back gracefully if unavailable)
     if args.pems_station is not None or True:  # always try; connector handles fallback
