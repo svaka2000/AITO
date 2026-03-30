@@ -67,7 +67,7 @@ class RewardWeights:
     emissions_co2: float = 0.03   # weight on CO2 proxy
     switch_penalty: float = 0.1   # flat penalty per phase change; scaled to match other dimensionless weights
     throughput: float = 0.08      # weight on normalized throughput
-    left_starve: float = 0.04     # weight on left-turn starvation penalty
+    left_starve: float = 0.0      # disabled: starvation penalty causes left-turn over-service with long training
 
 
 @dataclass(slots=True)

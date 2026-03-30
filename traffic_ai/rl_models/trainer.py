@@ -31,12 +31,15 @@ def train_rl_policy_suite(
     full_run: bool = False,
 ) -> RLTrainingResult:
     if full_run:
-        episodes = 500
+        episodes = 2000
     elif quick_run:
         episodes = 35
     else:
         episodes = 260
     env = SignalControlEnv(EnvConfig(seed=seed))
+    # DQN full-run uses 500-step episodes to match the evaluation horizon and prevent
+    # the agent from exploiting episode boundaries to ignore EW-direction starvation.
+    dqn_env = SignalControlEnv(EnvConfig(seed=seed, step_limit=500)) if full_run else env
     policies: dict[str, Any] = {}
     rows: list[dict[str, float | str]] = []
 
@@ -45,7 +48,7 @@ def train_rl_policy_suite(
     rows.extend({"algorithm": "q_learning", "episode": i, "reward": r} for i, r in enumerate(q_rewards))
     save_model(q_policy, output_dir / "models" / "q_learning_policy.joblib")
 
-    dqn_policy, dqn_rewards, dqn_network = train_dqn(env, episodes=episodes)
+    dqn_policy, dqn_rewards, dqn_network = train_dqn(dqn_env, episodes=episodes)
     policies["dqn"] = dqn_policy
     rows.extend({"algorithm": "dqn", "episode": i, "reward": r} for i, r in enumerate(dqn_rewards))
     if torch is not None and dqn_network is not None:

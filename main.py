@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--full-run",
         action="store_true",
-        help="Train RL agents for 500 episodes (overnight quality run)",
+        help="Train RL agents for 2000 episodes (overnight quality run)",
     )
     parser.add_argument(
         "--ingest-only",

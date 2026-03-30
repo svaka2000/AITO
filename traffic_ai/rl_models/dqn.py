@@ -75,14 +75,18 @@ def train_dqn(
     target_net = DQNetwork(input_dim=obs_dim, output_dim=n_act).to(device)
     target_net.load_state_dict(policy_net.state_dict())
     optimizer = optim.Adam(policy_net.parameters(), lr=lr)
-    memory: Deque[tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(maxlen=20_000)
+    # Cosine annealing: decays lr from lr → lr/100 over the full training run.
+    # Prevents late-stage gradient updates from destabilising the converged policy.
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(episodes, 1), eta_min=lr * 0.01)
+    memory: Deque[tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(maxlen=100_000)
     rewards: list[float] = []
 
     epsilon = 1.0
     epsilon_min = 0.05
-    # Decay anchored to 500-episode full schedule so exploration isn't exhausted
-    # before the 4-phase policy has converged regardless of actual episode count.
-    epsilon_decay = (epsilon - epsilon_min) / max(episodes, 500)
+    # Always reach epsilon_min within the first 500 episodes (or fewer if training
+    # is shorter). For long runs (e.g. 2000 ep) this leaves the bulk of training
+    # as near-greedy exploitation so Q-values stabilise rather than chasing noise.
+    epsilon_decay = (epsilon - epsilon_min) / min(episodes, 500)
 
     for episode in range(episodes):
         state = env.reset()
@@ -120,6 +124,7 @@ def train_dqn(
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
 
         epsilon = max(epsilon_min, epsilon - epsilon_decay)
         rewards.append(float(total_reward))
