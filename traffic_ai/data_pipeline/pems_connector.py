@@ -40,7 +40,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_STATION: int = 400456           # I-5 near downtown San Diego
 _PEMS_API_BASE: str = "https://pems.dot.ca.gov"
-_ENV_VAR_API_KEY: str = "PEMS_API_KEY"  # name of the env-var that holds the key
+_ENV_VAR_API_KEY: str = "PEMS_API_KEY"       # optional token-based auth
+_ENV_VAR_USERNAME: str = "PEMS_USERNAME"     # username/password auth
+_ENV_VAR_PASSWORD: str = "PEMS_PASSWORD"
 
 # Unified schema column names required by DatasetPreprocessor
 _UNIFIED_SCHEMA: list[str] = [
@@ -85,18 +87,23 @@ class PeMSConnector:
         self,
         station_id: int = _DEFAULT_STATION,
         api_key: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
         cache_dir: str | Path = "data/raw/pems",
     ) -> None:
         self.station_id = station_id
         self._api_key: str | None = api_key or os.environ.get(_ENV_VAR_API_KEY)
+        self._username: str | None = username or os.environ.get(_ENV_VAR_USERNAME)
+        self._password: str | None = password or os.environ.get(_ENV_VAR_PASSWORD)
+        self._session: Any = None   # requests.Session after login
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if not self._api_key:
+        if not self._api_key and not (self._username and self._password):
             warnings.warn(
-                f"PeMS API key not found.  Set the {_ENV_VAR_API_KEY!r} environment "
-                "variable or pass api_key=... to PeMSConnector.  "
-                "Falling back to synthetic traffic data.",
+                f"PeMS credentials not found.  Set {_ENV_VAR_USERNAME!r} + "
+                f"{_ENV_VAR_PASSWORD!r} (or {_ENV_VAR_API_KEY!r}) as environment "
+                "variables or in a .env file.  Falling back to synthetic data.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -127,9 +134,10 @@ class PeMSConnector:
         -------
         DataFrame with columns matching ``_UNIFIED_SCHEMA``.
         """
-        if not self._api_key:
+        has_credentials = bool(self._api_key or (self._username and self._password))
+        if not has_credentials:
             logger.warning(
-                "PeMS API key missing — returning synthetic fallback data for "
+                "PeMS credentials missing — returning synthetic fallback data for "
                 "station %d (%s → %s).", self.station_id, date_from, date_to
             )
             return self._synthetic_fallback(date_from, date_to)
@@ -205,6 +213,8 @@ class PeMSConnector:
             logger.info("Loading cached PeMS data from %s.", cache_key)
             return pd.read_csv(cache_key)
 
+        # Choose auth strategy: API key param OR session-based login
+        session = self._get_session()
         url = _PEMS_API_BASE + "/clearinghouse"
         params: dict[str, Any] = {
             "type": "station_5min",
@@ -213,15 +223,47 @@ class PeMSConnector:
             "start_time": d_from,
             "end_time": d_to,
             "format": "text/csv",
-            "user": self._api_key,
         }
-        response = requests.get(url, params=params, timeout=60)
+        if self._api_key:
+            params["user"] = self._api_key
+        response = session.get(url, params=params, timeout=60)
         response.raise_for_status()
 
         from io import StringIO
         raw = pd.read_csv(StringIO(response.text))
         raw.to_csv(cache_key, index=False)
         return raw
+
+    def _get_session(self) -> Any:
+        """Return an authenticated requests.Session (cached after first login)."""
+        import requests
+        if self._session is not None:
+            return self._session
+        session = requests.Session()
+        session.headers.update({"User-Agent": "AITO-PeMS-Connector/2.0"})
+        if self._username and self._password:
+            self._login(session)
+        self._session = session
+        return session
+
+    def _login(self, session: Any) -> None:
+        """Authenticate with PeMS using username/password (session cookie flow)."""
+        import requests
+        login_url = _PEMS_API_BASE + "/"
+        payload = {
+            "username": self._username,
+            "password": self._password,
+            "redirect": "",
+            "login": "Login",
+        }
+        resp = session.post(login_url, data=payload, timeout=30)
+        if resp.status_code == 200 and "logout" in resp.text.lower():
+            logger.info("PeMS login successful for user %s.", self._username)
+        else:
+            logger.warning(
+                "PeMS login may have failed (status=%d). "
+                "Will attempt data fetch anyway.", resp.status_code
+            )
 
     # ------------------------------------------------------------------
     # Normalisation: map raw PeMS columns → 15-column unified schema

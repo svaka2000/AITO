@@ -60,6 +60,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pems-calibrate",
+        action="store_true",
+        help=(
+            "Test PeMS connection and pull calibration data for the given station. "
+            "Uses PEMS_USERNAME / PEMS_PASSWORD from environment or .env file."
+        ),
+    )
+    parser.add_argument(
         "--shadow-mode",
         action="store_true",
         help=(
@@ -104,6 +112,58 @@ def _maybe_calibrate_from_pems(settings: object, pems_station: int | None) -> No
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("PeMS calibration skipped: %s", exc)
+
+
+def _run_pems_calibrate(args: argparse.Namespace, settings: object) -> None:
+    """Test PeMS connection and pull calibration data for the given station."""
+    import os
+    # Load .env if present
+    env_path = Path(".env")
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+
+    station_id = args.pems_station or 400456
+    username = os.environ.get("PEMS_USERNAME", "")
+    password = os.environ.get("PEMS_PASSWORD", "")
+
+    if not username or not password:
+        logger.error("PEMS_USERNAME / PEMS_PASSWORD not set. Add them to .env or environment.")
+        return
+
+    logger.info("Connecting to Caltrans PeMS — station %d as %s …", station_id, username)
+    print(f"\nPeMS Calibration Test")
+    print(f"  Station  : {station_id}")
+    print(f"  Username : {username}")
+    print(f"  Password : {'*' * len(password)}")
+
+    try:
+        from traffic_ai.data_pipeline.pems_connector import PeMSConnector
+        connector = PeMSConnector(station_id=station_id, username=username, password=password)
+        df = connector.fetch("2024-01-15", "2024-01-22")
+        calibration = connector.calibration_by_hour(df)
+
+        if calibration:
+            print(f"\n✓ Calibration loaded: {len(calibration)} hourly demand profiles")
+            for hour in sorted(calibration.keys())[:5]:
+                print(f"  Hour {hour:02d}: {calibration[hour]:.3f} veh/step")
+            if len(calibration) > 5:
+                print(f"  ... ({len(calibration) - 5} more hours)")
+            # Save calibration to artifacts
+            output_dir = Path(getattr(settings, "output_dir", "artifacts"))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            cal_path = output_dir / "pems_calibration.json"
+            import json as _json
+            cal_path.write_text(_json.dumps({"station_id": station_id, "calibration_by_hour": calibration}, indent=2))
+            print(f"\n✓ Saved to {cal_path}")
+        else:
+            print("\n⚠ Connection succeeded but no calibration data returned (synthetic fallback active)")
+    except Exception as e:
+        logger.error("PeMS calibration failed: %s", e)
+        print(f"\n✗ PeMS connection failed: {e}")
+        print("  → Synthetic fallback will be used in simulation runs")
 
 
 def _run_shadow_mode(args: argparse.Namespace, settings: object) -> None:
@@ -176,6 +236,11 @@ def main() -> None:
         settings.payload["project"]["output_dir"] = args.output_dir
         settings.output_dir.mkdir(parents=True, exist_ok=True)
     set_global_seed(settings.seed)
+
+    # PeMS calibration test
+    if args.pems_calibrate:
+        _run_pems_calibrate(args, settings)
+        return
 
     # Shadow mode: run AI evaluation without touching production traffic
     if args.shadow_mode:
