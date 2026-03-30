@@ -66,18 +66,29 @@ class ExperimentRunner:
     def run(
         self,
         ingest_only: bool = False,
+        pretrain_only: bool = False,
         include_kaggle: bool = True,
         include_public: bool = True,
     ) -> ExperimentArtifacts:
         """Orchestrates the full experiment pipeline end-to-end:
         data ingestion → model training → simulation → statistics → artifact generation.
+
+        With ``pretrain_only=True`` the pipeline stops after training RL agents and
+        saves their weights to disk — no cross-validation or benchmark is run.
         """
         data_result = self._run_data_pipeline(include_kaggle, include_public)
 
         if ingest_only:
             return self._early_exit_artifacts()
 
+        if pretrain_only:
+            self._train_rl_policies()
+            return self._early_exit_artifacts()
+
         supervised_metrics_df, supervised_controller_models = self._train_supervised_models(data_result)
+        # RL agents are pre-trained once here; the resulting policy objects are
+        # wrapped in inference-only RLPolicyController instances and reused
+        # across all CV folds without any per-fold retraining.
         rl_result = self._train_rl_policies()
         controllers = self._build_controller_set(supervised_controller_models, rl_result)
         all_steps, grouped_summary = self._run_cross_validated_simulations(controllers)

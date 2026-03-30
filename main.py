@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         help="Train RL agents for 2000 episodes (overnight quality run)",
     )
     parser.add_argument(
+        "--pretrain-only",
+        action="store_true",
+        help="Train and save RL models for 2000 episodes without running the full benchmark",
+    )
+    parser.add_argument(
         "--ingest-only",
         action="store_true",
         help="Run data ingestion and preprocessing only",
@@ -266,6 +271,7 @@ def main() -> None:
     runner = ExperimentRunner(settings=settings, quick_run=args.quick_run, full_run=args.full_run)
     artifacts = runner.run(
         ingest_only=args.ingest_only,
+        pretrain_only=getattr(args, "pretrain_only", False),
         include_kaggle=not args.skip_kaggle,
         include_public=not args.skip_public,
     )
