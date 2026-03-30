@@ -7,7 +7,7 @@
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 90](https://img.shields.io/badge/tests-90%20passing-brightgreen.svg)]()
+[![Tests: 132](https://img.shields.io/badge/tests-132%20passing-brightgreen.svg)]()
 
 </div>
 
@@ -56,7 +56,7 @@ TrafficAI/
 │   └── config/                # YAML configuration
 ├── docs/
 │   └── TECHNICAL_BRIEF.md     # ★ 1-page brief for government officials
-└── tests/                     # 66 unit tests
+└── tests/                     # 132 unit tests
 ```
 
 Items marked with ★ are new additions for the Caltrans demonstration.
@@ -111,6 +111,9 @@ pip install -r requirements.txt
 # Run full benchmark (10 controllers, 5-fold CV)
 python main.py --quick-run
 
+# Run with real Caltrans PeMS detector data calibration
+PEMS_API_KEY=<your_key> python main.py --pems-station 400456
+
 # Launch research dashboard
 streamlit run traffic_ai/dashboard/streamlit_app.py
 
@@ -119,6 +122,59 @@ streamlit run traffic_ai/dashboard/caltrans_demo.py
 
 # Run tests
 pytest -q
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--quick-run` | off | Fewer episodes; skips slow training stages |
+| `--skip-kaggle` | off | Skip Kaggle dataset download |
+| `--pems-station STATION_ID` | `400456` | Caltrans PeMS station for arrival-rate calibration (falls back to synthetic if `PEMS_API_KEY` not set) |
+
+---
+
+## Simulation Physics
+
+All intersection physics are calibrated to HCM 7th Edition defaults:
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Saturation flow rate | 1,800 veh/hr/lane | HCM 7th Ed., Table 19-9 |
+| Minimum green | 7 s | HCM 7th Ed., §19.4.3 |
+| Yellow clearance | 3 s | ITE recommended practice |
+| All-red clearance | 1 s | ITE recommended practice |
+| Turning movement factor | 0.60 | HCM-aligned |
+| Idle CO₂ rate | 0.000457 kg/s/vehicle | EPA MOVES2014b, Table 3.1 |
+
+The canonical simulation engine (`simulation_engine/engine.py`) is the single source of truth. `simulation/intersection.py` and `rl_models/environment.py` are thin wrappers — no physics duplication.
+
+### RL Action Space
+
+RL controllers use a **16-action** encoding (2 phases × 8 durations):
+
+| Action | Phase | Duration |
+|--------|-------|----------|
+| 0 | NS green | 15 s |
+| 1 | NS green | 20 s |
+| … | … | … |
+| 7 | NS green | 60 s |
+| 8 | EW green | 15 s |
+| … | … | … |
+| 15 | EW green | 60 s |
+
+The 6-dimensional observation vector is `[phase_elapsed/60, phase_ns, queue_ns/120, queue_ew/120, time_of_day_norm, upstream_queue/120]`.
+
+### Caltrans PeMS Integration
+
+`PeMSConnector` fetches real detector data (station, volume, occupancy, speed) for arrival-rate calibration. When `PEMS_API_KEY` is not set, it falls back automatically to a Gaussian-mixture synthetic profile calibrated to I-5 San Diego (station 400456).
+
+```python
+from traffic_ai.data_pipeline.pems_connector import PeMSConnector
+
+connector = PeMSConnector(station_id=400456)  # uses PEMS_API_KEY env var if present
+df = connector.fetch("2024-01-15", "2024-01-22")
+hourly_volumes = connector.calibration_by_hour(df)
 ```
 
 ---
@@ -187,7 +243,7 @@ Uses official EPA factors:
 - **Mann-Whitney U tests** (α=0.05) for pairwise significance
 - **Bootstrap confidence intervals** (95% CI, 300 resamples)
 - **Ablation study** for hyperparameter sensitivity
-- **90 unit tests** (pytest)
+- **132 unit tests** (pytest)
 
 ---
 

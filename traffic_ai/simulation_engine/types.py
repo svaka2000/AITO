@@ -28,6 +28,9 @@ class IntersectionState:
     emergency_active: bool = False
     emergency_direction: str = ""
     emergency_steps_remaining: int = 0
+    # HCM signal timing: yellow + all-red clearance interval tracking
+    transition_steps_remaining: int = 0
+    target_phase: SignalPhase = "NS"
 
     @property
     def queue_ns(self) -> float:
@@ -41,7 +44,7 @@ class IntersectionState:
     def total_queue(self) -> float:
         return self.queue_ns + self.queue_ew
 
-    def as_observation(self, sim_step: int) -> dict[str, float]:
+    def as_observation(self, sim_step: int, upstream_queue: float = 0.0) -> dict[str, float]:
         return {
             "intersection_id": float(self.intersection_id),
             "sim_step": float(sim_step),
@@ -55,6 +58,10 @@ class IntersectionState:
             "departures": float(self.total_departures),
             "wait_sec": float(self.cumulative_wait_sec),
             "emergency_active": 1.0 if self.emergency_active else 0.0,
+            # New observation features for expanded RL action space (Problem 4)
+            "upstream_queue": upstream_queue,
+            "time_of_day_normalized": (sim_step / 3600.0 % 24.0) / 24.0,
+            "in_transition": 1.0 if self.transition_steps_remaining > 0 else 0.0,
         }
 
 
@@ -64,13 +71,15 @@ class StepMetrics:
     total_queue: float
     avg_wait_sec: float
     throughput: float
-    emissions_proxy: float
+    emissions_proxy: float   # kept for backward compat; equals emissions_co2_kg
     fuel_proxy: float
     fairness: float
     efficiency_score: float
     delay_reduction_pct: float
     fuel_gallons: float = 0.0
     co2_kg: float = 0.0
+    # First-class EPA MOVES2014b emission metric (replaces fabricated proxy)
+    emissions_co2_kg: float = 0.0
 
 
 @dataclass(slots=True)

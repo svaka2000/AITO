@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover
 if TORCH_AVAILABLE:
 
     class DQNetwork(nn.Module):
-        def __init__(self, input_dim: int = 5, output_dim: int = 2) -> None:
+        def __init__(self, input_dim: int = 6, output_dim: int = 16) -> None:
             super().__init__()
             self.net = nn.Sequential(
                 nn.Linear(input_dim, 64),
@@ -45,11 +45,13 @@ class DQNPolicy:
 
     def act(self, features: np.ndarray) -> int:
         if TORCH_AVAILABLE and self.network is not None:
-            obs = torch.tensor(features[:5], dtype=torch.float32).unsqueeze(0)
+            obs = torch.tensor(features[:6], dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 q = self.network(obs)
-            return int(torch.argmax(q, dim=-1).item())
-        return int(features[0] < features[1])
+            full_action = int(torch.argmax(q, dim=-1).item())
+            # Return phase index (0=NS, 1=EW) from the 16-action encoding
+            return full_action // 8
+        return int(features[2] < features[3])  # queue_ns_norm < queue_ew_norm → EW
 
 
 def train_dqn(
@@ -67,8 +69,10 @@ def train_dqn(
 
     torch.manual_seed(seed)
     device = torch.device("cpu")
-    policy_net = DQNetwork().to(device)
-    target_net = DQNetwork().to(device)
+    obs_dim = env.observation_dim
+    n_act = env.n_actions
+    policy_net = DQNetwork(input_dim=obs_dim, output_dim=n_act).to(device)
+    target_net = DQNetwork(input_dim=obs_dim, output_dim=n_act).to(device)
     target_net.load_state_dict(policy_net.state_dict())
     optimizer = optim.Adam(policy_net.parameters(), lr=lr)
     memory: Deque[tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(maxlen=20_000)
@@ -84,7 +88,7 @@ def train_dqn(
         total_reward = 0.0
         while not done:
             if rng.random() < epsilon:
-                action = int(rng.integers(0, 2))
+                action = int(rng.integers(0, n_act))
             else:
                 with torch.no_grad():
                     q_values = policy_net(torch.tensor(state, dtype=torch.float32).unsqueeze(0))

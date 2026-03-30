@@ -30,6 +30,77 @@ from traffic_ai.simulation_engine.types import SignalPhase
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Imitation learning: generate labels from AdaptiveRuleController
+# ---------------------------------------------------------------------------
+
+def generate_imitation_labels(
+    simulator: "Any",
+    rule_controller: "Any",
+    n_steps: int = 500,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run ``rule_controller`` on ``simulator`` and return imitation labels.
+
+    This implements **imitation learning** (behavioural cloning): instead of
+    training ML controllers on trivial heuristic labels
+    (``action = int(ns_queue < ew_queue)``), we train them to imitate the
+    best non-ML baseline — the ``AdaptiveRuleController``.
+
+    The AdaptiveRuleController uses queue-threshold logic with minimum/maximum
+    green constraints and produces substantially better labels than simple
+    queue-balance comparisons.
+
+    Parameters
+    ----------
+    simulator:
+        A :class:`~traffic_ai.simulation_engine.engine.TrafficNetworkSimulator`
+        instance (or compatible).
+    rule_controller:
+        An :class:`~traffic_ai.controllers.adaptive_rule.AdaptiveRuleController`
+        instance (or any BaseController).
+    n_steps:
+        Number of simulation steps to run; more steps → richer label set.
+
+    Returns
+    -------
+    (X, y)
+        ``X`` : ``(n_steps, 7)`` float32 feature matrix (using ``_extract_features``).
+        ``y`` : ``(n_steps,)`` integer array of actions (0=NS, 1=EW).
+    """
+    from traffic_ai.simulation_engine.engine import TrafficNetworkSimulator
+    from traffic_ai.simulation_engine.types import SignalPhase
+
+    n_intersections = len(simulator.states)
+    rule_controller.reset(n_intersections)
+    simulator.states = simulator._init_intersections()
+
+    X_rows: list[np.ndarray] = []
+    y_rows: list[int] = []
+
+    for step in range(n_steps):
+        simulator.demand.tick_emergency(step)
+        simulator.demand.tick_incident(step)
+        simulator._apply_emergency_events(step)
+
+        observations = simulator._collect_observations(step)
+        actions = rule_controller.compute_actions(observations, step)
+        actions = simulator._override_emergency_actions(actions)
+
+        for iid, obs in observations.items():
+            feat = _extract_features(obs)
+            phase: SignalPhase = actions.get(iid, "NS")
+            label = 0 if phase == "NS" else 1
+            X_rows.append(feat)
+            y_rows.append(label)
+
+        simulator._advance_step(actions, step)
+
+    X = np.stack(X_rows, axis=0).astype(np.float32)
+    y = np.array(y_rows, dtype=np.int64)
+    return X, y
+
+
 # ---------------------------------------------------------------------------
 # Feature vector helpers
 # ---------------------------------------------------------------------------

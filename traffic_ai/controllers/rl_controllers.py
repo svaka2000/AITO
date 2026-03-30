@@ -30,20 +30,43 @@ from traffic_ai.simulation_engine.types import SignalPhase
 
 logger = logging.getLogger(__name__)
 
-N_ACTIONS = 2  # 0 = NS green, 1 = EW green
-STATE_DIM = 6
+# Expanded action space (Problem 4):
+# action = phase_idx * N_DURATIONS + duration_idx
+# phase_idx   ∈ {0=NS, 1=EW}
+# duration_idx ∈ index into GREEN_DURATIONS
+GREEN_DURATIONS: list[int] = [15, 20, 25, 30, 35, 40, 45, 60]
+N_DURATIONS: int = len(GREEN_DURATIONS)   # 8
+N_PHASES: int = 2
+N_ACTIONS: int = N_PHASES * N_DURATIONS   # 16
+STATE_DIM: int = 6
+
+
+def _action_to_phase(action: int) -> int:
+    """Extract phase index (0 or 1) from a 16-action integer."""
+    return int(action) // N_DURATIONS
 
 
 def _obs_to_vec(obs: dict[str, float]) -> np.ndarray:
-    """Standard 6-feature observation vector used by all RL controllers."""
+    """6-feature observation vector for RL controllers.
+
+    Features (Problem 4 expanded observation space)
+    ------------------------------------------------
+    0  phase_elapsed_norm   : phase_elapsed / 60
+    1  phase_ns             : 1.0 if current phase is NS, else 0.0
+    2  queue_ns_norm        : queue_ns / 120
+    3  queue_ew_norm        : queue_ew / 120
+    4  time_of_day_norm     : time_of_day in [0, 1]
+    5  upstream_queue_norm  : avg upstream queue / 120
+    """
     return np.array(
         [
-            obs.get("queue_ns", 0.0),
-            obs.get("queue_ew", 0.0),
-            obs.get("avg_speed", 30.0),
-            obs.get("lane_occupancy", 0.5),
-            float(obs.get("current_phase", 0.0)),
-            float(obs.get("step", 0.0)) % 86400.0 / 86400.0,
+            obs.get("phase_elapsed", 0.0) / 60.0,
+            obs.get("phase_ns", float(obs.get("current_phase", 0.0)) == 0.0),
+            obs.get("queue_ns", 0.0) / 120.0,
+            obs.get("queue_ew", 0.0) / 120.0,
+            obs.get("time_of_day_normalized",
+                    (float(obs.get("step", obs.get("sim_step", 0.0))) % 86400.0) / 86400.0),
+            obs.get("upstream_queue", 0.0) / 120.0,
         ],
         dtype=np.float32,
     )
@@ -82,6 +105,8 @@ class QLearningController(BaseController):
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
         self._rng = np.random.default_rng(seed)
+        # Q table: (q_ns_bucket, q_ew_bucket, current_phase, action)
+        # action ∈ [0, N_ACTIONS) = 16 (phase × duration)
         self._q: np.ndarray = np.zeros(
             (self.QUEUE_BUCKETS, self.QUEUE_BUCKETS, 2, N_ACTIONS), dtype=np.float64
         )
@@ -100,13 +125,17 @@ class QLearningController(BaseController):
     ) -> dict[int, SignalPhase]:
         actions: dict[int, SignalPhase] = {}
         for iid, obs in observations.items():
-            a = self._act(iid, obs)
-            actions[iid] = "NS" if a == 0 else "EW"
-            self._current_phase[iid] = a
+            full_action = self._act(iid, obs)
+            # Extract phase from joint (phase, duration) action
+            phase_idx = _action_to_phase(full_action)
+            actions[iid] = "NS" if phase_idx == 0 else "EW"
+            self._current_phase[iid] = phase_idx
         return actions
 
     def select_action(self, obs: dict[str, float]) -> int:
-        return self._act(0, obs)
+        """Return phase index (0=NS, 1=EW) — satisfies BaseController interface."""
+        full_action = self._act(0, obs)
+        return _action_to_phase(full_action)
 
     def update(
         self,
@@ -116,11 +145,14 @@ class QLearningController(BaseController):
         next_obs: dict[str, float],
         done: bool = False,
     ) -> None:
+        # action may be phase-only (0/1) from external callers or full (0-15) from env
+        # Clamp to valid range for safety
+        safe_action = max(0, min(int(action), N_ACTIONS - 1))
         s = self._discretize(obs)
         s_next = self._discretize(next_obs)
         q_next = 0.0 if done else float(np.max(self._q[s_next]))
         td_target = reward + self.gamma * q_next
-        self._q[s][action] += self.alpha * (td_target - self._q[s][action])
+        self._q[s][safe_action] += self.alpha * (td_target - self._q[s][safe_action])
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def _act(self, iid: int, obs: dict[str, float]) -> int:
@@ -263,13 +295,16 @@ class DQNController(BaseController):
     ) -> dict[int, SignalPhase]:
         actions: dict[int, SignalPhase] = {}
         for iid, obs in observations.items():
-            a = self._act(_obs_to_vec(obs))
-            actions[iid] = "NS" if a == 0 else "EW"
-            self._current_phase[iid] = a
+            full_action = self._act(_obs_to_vec(obs))
+            phase_idx = _action_to_phase(full_action)
+            actions[iid] = "NS" if phase_idx == 0 else "EW"
+            self._current_phase[iid] = phase_idx
         return actions
 
     def select_action(self, obs: dict[str, float]) -> int:
-        return self._act(_obs_to_vec(obs))
+        """Return phase index (0=NS, 1=EW) — satisfies BaseController interface."""
+        full_action = self._act(_obs_to_vec(obs))
+        return _action_to_phase(full_action)
 
     def update(
         self,
@@ -453,18 +488,20 @@ class PPOController(BaseController):
         actions: dict[int, SignalPhase] = {}
         for iid, obs in observations.items():
             vec = _obs_to_vec(obs)
-            a, log_prob = self._sample_action(vec)
-            actions[iid] = "NS" if a == 0 else "EW"
-            self._current_phase[iid] = a
+            full_action, _ = self._sample_action(vec)
+            phase_idx = _action_to_phase(full_action)
+            actions[iid] = "NS" if phase_idx == 0 else "EW"
+            self._current_phase[iid] = phase_idx
         return actions
 
     def select_action(self, obs: dict[str, float]) -> int:
+        """Return phase index (0=NS, 1=EW) — satisfies BaseController interface."""
         vec = _obs_to_vec(obs)
         self._last_obs = vec
-        a, log_prob = self._sample_action(vec)
-        self._last_action = a
+        full_action, log_prob = self._sample_action(vec)
+        self._last_action = full_action
         self._last_log_prob = log_prob
-        return a
+        return _action_to_phase(full_action)
 
     def update(
         self,
@@ -625,13 +662,15 @@ class A2CController(BaseController):
     ) -> dict[int, SignalPhase]:
         actions: dict[int, SignalPhase] = {}
         for iid, obs in observations.items():
-            a = self._sample_action(_obs_to_vec(obs))
-            actions[iid] = "NS" if a == 0 else "EW"
-            self._current_phase[iid] = a
+            full_action = self._sample_action(_obs_to_vec(obs))
+            phase_idx = _action_to_phase(full_action)
+            actions[iid] = "NS" if phase_idx == 0 else "EW"
+            self._current_phase[iid] = phase_idx
         return actions
 
     def select_action(self, obs: dict[str, float]) -> int:
-        return self._sample_action(_obs_to_vec(obs))
+        """Return phase index (0=NS, 1=EW) — satisfies BaseController interface."""
+        return _action_to_phase(self._sample_action(_obs_to_vec(obs)))
 
     def update(
         self,
@@ -641,8 +680,9 @@ class A2CController(BaseController):
         next_obs: dict[str, float],
         done: bool = False,
     ) -> None:
+        safe_action = max(0, min(int(action), N_ACTIONS - 1))
         self._rollout.append(
-            {"obs": _obs_to_vec(obs), "action": action, "reward": reward,
+            {"obs": _obs_to_vec(obs), "action": safe_action, "reward": reward,
              "next_obs": _obs_to_vec(next_obs), "done": done}
         )
         if len(self._rollout) >= self.rollout_len or done:
@@ -809,13 +849,15 @@ class SACController(BaseController):
     ) -> dict[int, SignalPhase]:
         actions: dict[int, SignalPhase] = {}
         for iid, obs in observations.items():
-            a = self._sample_action(_obs_to_vec(obs))
-            actions[iid] = "NS" if a == 0 else "EW"
-            self._current_phase[iid] = a
+            full_action = self._sample_action(_obs_to_vec(obs))
+            phase_idx = _action_to_phase(full_action)
+            actions[iid] = "NS" if phase_idx == 0 else "EW"
+            self._current_phase[iid] = phase_idx
         return actions
 
     def select_action(self, obs: dict[str, float]) -> int:
-        return self._sample_action(_obs_to_vec(obs))
+        """Return phase index (0=NS, 1=EW) — satisfies BaseController interface."""
+        return _action_to_phase(self._sample_action(_obs_to_vec(obs)))
 
     def update(
         self,
@@ -825,7 +867,8 @@ class SACController(BaseController):
         next_obs: dict[str, float],
         done: bool = False,
     ) -> None:
-        self._buffer.append((_obs_to_vec(obs), action, reward, _obs_to_vec(next_obs), done))
+        safe_action = max(0, min(int(action), N_ACTIONS - 1))
+        self._buffer.append((_obs_to_vec(obs), safe_action, reward, _obs_to_vec(next_obs), done))
         if len(self._buffer) >= self.batch_size:
             self._sac_update()
 
@@ -1022,14 +1065,16 @@ class RecurrentPPOController(BaseController):
     ) -> dict[int, SignalPhase]:
         actions: dict[int, SignalPhase] = {}
         for iid, obs in observations.items():
-            a, _ = self._act_recurrent(iid, _obs_to_vec(obs))
-            actions[iid] = "NS" if a == 0 else "EW"
-            self._current_phase[iid] = a
+            full_action, _ = self._act_recurrent(iid, _obs_to_vec(obs))
+            phase_idx = _action_to_phase(full_action)
+            actions[iid] = "NS" if phase_idx == 0 else "EW"
+            self._current_phase[iid] = phase_idx
         return actions
 
     def select_action(self, obs: dict[str, float]) -> int:
-        a, _ = self._act_recurrent(0, _obs_to_vec(obs))
-        return a
+        """Return phase index (0=NS, 1=EW) — satisfies BaseController interface."""
+        full_action, _ = self._act_recurrent(0, _obs_to_vec(obs))
+        return _action_to_phase(full_action)
 
     def update(
         self,
@@ -1041,9 +1086,10 @@ class RecurrentPPOController(BaseController):
     ) -> None:
         vec = _obs_to_vec(obs)
         next_vec = _obs_to_vec(next_obs)
+        safe_action = max(0, min(int(action), N_ACTIONS - 1))
         _, log_prob = self._act_recurrent(0, vec, return_log_prob=True)
         self._rollout.append(
-            {"obs": vec, "action": action, "reward": reward,
+            {"obs": vec, "action": safe_action, "reward": reward,
              "next_obs": next_vec, "done": done, "log_prob": log_prob}
         )
         if done or len(self._rollout) >= self.SEQ_LEN * 2:

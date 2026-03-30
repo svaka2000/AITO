@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -38,9 +38,29 @@ class SimulatorConfig:
     demand_profile: str = "rush_hour"
     demand_scale: float = 1.0
     seed: int = 42
+    # HCM 7th edition signal timing defaults
+    min_green_sec: int = 7          # HCM 7th ed. minimum green interval (seconds)
+    yellow_sec: int = 3             # HCM 7th ed. yellow change interval (seconds)
+    all_red_sec: int = 1            # HCM 7th ed. all-red clearance interval (seconds)
+    saturation_flow_rate: float = 1800.0  # veh/hr/lane — HCM 7th ed. default for LT+TH+RT
+    # HCM-aligned turning movement factor (fraction of departures forwarded downstream)
+    turning_movement_factor: float = 0.60  # replaces hardcoded 0.65; HCM-aligned default
 
 
 class TrafficNetworkSimulator:
+    """Canonical physics engine for the entire platform.
+
+    All controllers, RL training, benchmarking, and the dashboard live
+    simulation run through this single engine.  Two operating modes:
+
+    * **Batch mode** – ``run(controller)`` runs a full episode and returns a
+      ``SimulationResult``.  Used by the experiment runner and benchmarks.
+
+    * **Step-by-step mode** – ``reset_env()`` + ``step_env(actions)`` expose a
+      Gym-compatible interface used by ``MultiIntersectionNetwork`` and
+      ``SignalControlEnv``.
+    """
+
     def __init__(self, config: SimulatorConfig) -> None:
         self.config = config
         self.rng = np.random.default_rng(config.seed)
@@ -54,6 +74,12 @@ class TrafficNetworkSimulator:
         self.intersection_ids = list(range(config.intersections))
         self.neighbors = self._build_directional_neighbors()
         self.states = self._init_intersections()
+        # Step-by-step mode tracking
+        self._env_step: int = 0
+
+    # =========================================================================
+    # Batch mode: run a full episode
+    # =========================================================================
 
     def run(self, controller: ControllerLike, steps: int | None = None) -> SimulationResult:
         total_steps = steps or self.config.steps
@@ -63,17 +89,12 @@ class TrafficNetworkSimulator:
 
         baseline_reference_queue = None
         for step in range(total_steps):
-            # Tick demand side-effects (emergency, incident)
             self.demand.tick_emergency(step)
             self.demand.tick_incident(step)
-
-            # Apply emergency vehicle overrides from demand model
             self._apply_emergency_events(step)
 
             observations = self._collect_observations(step)
             actions = controller.compute_actions(observations, step)
-
-            # Emergency vehicles force phase regardless of controller
             actions = self._override_emergency_actions(actions)
 
             self._advance_step(actions, step)
@@ -95,6 +116,73 @@ class TrafficNetworkSimulator:
             aggregate=aggregate,
         )
 
+    # =========================================================================
+    # Step-by-step mode: Gym-compatible interface
+    # =========================================================================
+
+    def reset_env(self) -> dict[int, dict[str, float]]:
+        """Reset all intersection states for step-by-step operation.
+
+        Returns
+        -------
+        Initial observations for all intersections.
+        """
+        self.states = self._init_intersections()
+        self._env_step = 0
+        self.rng = np.random.default_rng(self.config.seed)
+        self.demand = DemandModel(
+            profile=self.config.demand_profile,  # type: ignore[arg-type]
+            scale=self.config.demand_scale,
+            step_seconds=self.config.step_seconds,
+            seed=self.config.seed,
+        )
+        return self._collect_observations(0)
+
+    def step_env(
+        self,
+        actions: dict[int, SignalPhase],
+    ) -> tuple[dict[int, dict[str, float]], float, bool, dict[str, Any]]:
+        """Advance the simulation one step.
+
+        Parameters
+        ----------
+        actions:
+            ``{intersection_id: phase}`` where phase is ``"NS"`` or ``"EW"``.
+
+        Returns
+        -------
+        (obs, reward, done, info)
+            Gym-compatible tuple.
+        """
+        step = self._env_step
+        self.demand.tick_emergency(step)
+        self.demand.tick_incident(step)
+        self._apply_emergency_events(step)
+        actions = self._override_emergency_actions(actions)
+
+        self._advance_step(actions, step)
+        metrics = self._compute_step_metrics(step)
+
+        self._env_step += 1
+        done = self._env_step >= self.config.steps
+
+        total_q = metrics.total_queue
+        obs = self._collect_observations(self._env_step)
+        reward = -float(total_q)
+        info: dict[str, Any] = {
+            "step": self._env_step,
+            "total_queue": total_q,
+            "avg_wait": metrics.avg_wait_sec,
+            "throughput": metrics.throughput,
+            "emissions_co2_kg": metrics.emissions_co2_kg,
+            "fuel_gallons": metrics.fuel_gallons,
+        }
+        return obs, reward, done, info
+
+    # =========================================================================
+    # Emergency handling
+    # =========================================================================
+
     def _apply_emergency_events(self, step: int) -> None:
         """Assign incoming emergency events to random intersections."""
         events = self.demand.pop_emergency_events()
@@ -113,7 +201,6 @@ class TrafficNetworkSimulator:
         for iid, state in self.states.items():
             if state.emergency_active and state.emergency_steps_remaining > 0:
                 ev_dir = state.emergency_direction
-                # Map N/S direction to NS phase, E/W to EW
                 required_phase: SignalPhase = "NS" if ev_dir in ("N", "S") else "EW"
                 overridden[iid] = required_phase
                 state.emergency_steps_remaining -= 1
@@ -122,19 +209,21 @@ class TrafficNetworkSimulator:
                     state.emergency_direction = ""
         return overridden
 
-    # -------------------------------------------------------------------------
-    # Orchestrator: sequences the four phases that make up one simulation tick.
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # Orchestrator: sequences one simulation tick
+    # =========================================================================
+
     def _advance_step(self, actions: dict[int, SignalPhase], step: int) -> None:
-        """Orchestrates one simulation tick: inflow → signals → arrivals → service & propagation."""
+        """Orchestrates one simulation tick: inflow → signals → arrivals → service."""
         self._apply_pending_inflow()
         self._update_signal_phases(actions)
         self._generate_stochastic_arrivals(step)
         self._service_and_propagate()
 
-    # -------------------------------------------------------------------------
-    # SRP: Distributes buffered upstream flow into receiving lanes before the tick.
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # SRP sub-steps
+    # =========================================================================
+
     def _apply_pending_inflow(self) -> None:
         """Moves vehicles queued from the previous tick into a randomly chosen receiving lane."""
         for state in self.states.values():
@@ -146,34 +235,60 @@ class TrafficNetworkSimulator:
                 )
             state.pending_inflow = {}
 
-    # -------------------------------------------------------------------------
-    # SRP: Applies controller phase decisions and increments elapsed-phase counters.
-    # -------------------------------------------------------------------------
     def _update_signal_phases(self, actions: dict[int, SignalPhase]) -> None:
-        """Commits the controller's chosen phase at each intersection; tracks phase changes."""
+        """Commits phase decisions with HCM 7th edition minimum green enforcement.
+
+        Phase changes are deferred until:
+        1. The current phase has been green for at least ``min_green_sec`` steps,
+           AND
+        2. Any pending yellow+all-red transition has completed.
+
+        When a phase change is approved, a transition interval of
+        ``yellow_sec + all_red_sec`` steps begins.  During this window the
+        old phase remains nominally active but ``transition_steps_remaining > 0``
+        causes ``_service_intersection`` to suppress all departures (all-red
+        clearance semantics).
+        """
         for intersection_id, state in self.states.items():
             requested = actions.get(intersection_id, state.current_phase)
+
+            # --- Complete any in-progress yellow/all-red transition ---
+            if state.transition_steps_remaining > 0:
+                state.transition_steps_remaining -= 1
+                if state.transition_steps_remaining == 0:
+                    # Transition complete: switch to the target phase
+                    state.current_phase = state.target_phase
+                    state.phase_elapsed = 0
+                    state.phase_changes += 1
+                continue  # no further action while in transition
+
+            # --- Steady-state: evaluate whether a phase change is allowed ---
             if requested != state.current_phase:
-                state.current_phase = requested
-                state.phase_elapsed = 0
-                state.phase_changes += 1
+                # HCM 7th ed.: enforce minimum green before phase change
+                if state.phase_elapsed >= self.config.min_green_sec:
+                    # Begin yellow + all-red clearance interval
+                    transition = self.config.yellow_sec + self.config.all_red_sec
+                    state.transition_steps_remaining = transition
+                    state.target_phase = requested
+                    # phase_elapsed keeps counting during transition (not reset yet)
+                else:
+                    # Minimum green not satisfied — hold current phase
+                    state.phase_elapsed += 1
             else:
                 state.phase_elapsed += 1
 
-    # -------------------------------------------------------------------------
-    # SRP: Samples new vehicle arrivals from a Poisson process for every direction.
-    # -------------------------------------------------------------------------
     def _generate_stochastic_arrivals(self, step: int) -> None:
         """Adds Poisson-distributed arrivals to each lane based on the current demand profile."""
         for state in self.states.values():
             for direction in ["N", "S", "E", "W"]:
                 self._sample_arrivals_for_direction(state, direction, step)
 
-    # -------------------------------------------------------------------------
-    # SRP: Services each intersection and routes departing vehicles to neighbors.
-    # -------------------------------------------------------------------------
     def _service_and_propagate(self) -> None:
-        """Clears green-phase queues, then forwards 65% of departures to downstream intersections."""
+        """Clears green-phase queues; forwards turning_movement_factor of departures downstream.
+
+        The propagation fraction defaults to 0.60 (HCM-aligned; replaces the
+        previously hardcoded 0.65 which had no cited source).
+        """
         flow_to_neighbors: dict[tuple[int, Direction], float] = defaultdict(float)
         for intersection_id, state in self.states.items():
             departures_by_direction = self._service_intersection(state)
@@ -181,7 +296,8 @@ class TrafficNetworkSimulator:
                 neighbor_id = self.neighbors[intersection_id].get(direction)
                 if neighbor_id is None:
                     continue
-                transfer = departed * 0.65
+                # HCM-aligned turning movement factor (configurable, default 0.60)
+                transfer = departed * self.config.turning_movement_factor
                 if transfer <= 0:
                     continue
                 incoming_direction = self._opposite(direction)
@@ -205,10 +321,26 @@ class TrafficNetworkSimulator:
             state.total_arrivals += int(arrivals)
 
     def _service_intersection(self, state: IntersectionState) -> dict[Direction, float]:
-        green_directions = ["N", "S"] if state.current_phase == "NS" else ["E", "W"]
+        """Service vehicles at the intersection for one simulation step.
+
+        During yellow + all-red clearance (``transition_steps_remaining > 0``)
+        no vehicles depart — this models the all-red clearance interval per
+        HCM 7th edition.
+
+        Saturation flow rate: 1800 veh/hr/lane (HCM 7th ed. default for shared
+        through/turn movements) = 0.5 veh/s/lane.
+        """
         departures: dict[Direction, float] = {d: 0.0 for d in ["N", "S", "E", "W"]}
 
-        saturation_rate_per_lane = 0.45  # veh/s/lane (HCM 6th Edition)
+        # HCM 7th ed. all-red clearance: suppress all departures during transition
+        if state.transition_steps_remaining > 0:
+            state.cumulative_wait_sec += state.total_queue * self.config.step_seconds
+            state.cumulative_stopped_vehicles += state.total_queue
+            return departures
+
+        green_directions = ["N", "S"] if state.current_phase == "NS" else ["E", "W"]
+        # HCM 7th ed. saturation flow rate: 1800 veh/hr/lane = 0.5 veh/s/lane
+        saturation_rate_per_lane = self.config.saturation_flow_rate / 3600.0
         non_compliance = self.demand.noncompliance_rate()
 
         for direction in ["N", "S", "E", "W"]:
@@ -236,11 +368,22 @@ class TrafficNetworkSimulator:
         state.total_departures += int(sum(departures.values()))
         return departures
 
+    # =========================================================================
+    # Observations and metrics
+    # =========================================================================
+
     def _collect_observations(self, step: int) -> dict[int, dict[str, float]]:
-        return {
-            intersection_id: state.as_observation(step)
-            for intersection_id, state in self.states.items()
-        }
+        """Collect per-intersection observations, including upstream queue averages."""
+        obs: dict[int, dict[str, float]] = {}
+        for intersection_id, state in self.states.items():
+            neighbor_queues = [
+                self.states[nid].total_queue
+                for nid in self.neighbors[intersection_id].values()
+                if nid is not None and nid in self.states
+            ]
+            upstream_queue = float(np.mean(neighbor_queues)) if neighbor_queues else 0.0
+            obs[intersection_id] = state.as_observation(step, upstream_queue=upstream_queue)
+        return obs
 
     def _compute_step_metrics(self, step: int) -> StepMetrics:
         queues = np.array([state.total_queue for state in self.states.values()], dtype=np.float64)
@@ -252,12 +395,14 @@ class TrafficNetworkSimulator:
             sum(state.total_departures for state in self.states.values())
         ) / max(step + 1, 1)
         total_phase_changes = int(sum(state.phase_changes for state in self.states.values()))
-        emissions_proxy = total_queue * 0.21 + float(total_phase_changes * 0.8)
-        fuel_proxy = total_queue * 0.12 + throughput * 0.04
-        fairness = self._fairness_score(queues)
-        efficiency = throughput / (1.0 + total_queue / max(len(self.states), 1))
 
-        # EPA-based fuel and CO₂
+        # EPA MOVES2014b idle emission factor for light-duty gasoline vehicles.
+        # idle_co2_rate_per_sec = 0.000457 kg/s/vehicle (= 0.0274 kg/min / 60)
+        idle_co2_rate_per_sec = 0.000457
+        emissions_co2_kg = total_queue * idle_co2_rate_per_sec * self.config.step_seconds
+
+        # EPA-based detailed fuel and CO₂ from EmissionsCalculator (includes
+        # stop-start penalty and moving fuel components)
         fuel_gallons, co2_kg = self._emissions_calc.compute_step(
             total_queue=total_queue,
             departures=total_departures,
@@ -265,18 +410,24 @@ class TrafficNetworkSimulator:
             step_seconds=self.config.step_seconds,
         )
 
+        fuel_proxy = total_queue * 0.12 + throughput * 0.04
+        fairness = self._fairness_score(queues)
+        efficiency = throughput / (1.0 + total_queue / max(len(self.states), 1))
+
         return StepMetrics(
             step=step,
             total_queue=total_queue,
             avg_wait_sec=avg_wait,
             throughput=throughput,
-            emissions_proxy=emissions_proxy,
+            # emissions_proxy now mirrors the EPA MOVES2014b value (not fabricated)
+            emissions_proxy=emissions_co2_kg,
             fuel_proxy=fuel_proxy,
             fairness=fairness,
             efficiency_score=efficiency,
             delay_reduction_pct=0.0,
             fuel_gallons=fuel_gallons,
             co2_kg=co2_kg,
+            emissions_co2_kg=emissions_co2_kg,
         )
 
     @staticmethod
@@ -323,7 +474,12 @@ class TrafficNetworkSimulator:
             "max_queue_length": float(max(item.total_queue for item in logs)),
             "total_fuel_gallons": float(sum(item.fuel_gallons for item in logs)),
             "total_co2_kg": float(sum(item.co2_kg for item in logs)),
+            "total_emissions_co2_kg": float(sum(item.emissions_co2_kg for item in logs)),
         }
+
+    # =========================================================================
+    # Initialisation helpers
+    # =========================================================================
 
     def _init_intersections(self) -> dict[int, IntersectionState]:
         states: dict[int, IntersectionState] = {}

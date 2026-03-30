@@ -90,6 +90,48 @@ Deliver a modular, reproducible AI traffic optimization research platform with c
 - [x] `CONTROLLER_DISPLAY_NAMES` updated for 14 controllers.
 - [x] `plotly>=5.20.0` added to requirements.txt.
 
+## Phase 10: Technical Overhaul — DONE
+
+### Engine Unification (Problem 1)
+- [x] `TrafficNetworkSimulator` in `simulation_engine/engine.py` is the single canonical engine.
+- [x] Added `reset_env()` / `step_env()` Gym-compatible interface to canonical engine.
+- [x] Rewrote `simulation/intersection.py` (`MultiIntersectionNetwork`) as a thin wrapper delegating all physics to engine.
+- [x] Rewrote `rl_models/environment.py` (`SignalControlEnv`) as a thin wrapper over engine; eliminated duplicate queue/arrival logic.
+
+### Caltrans PeMS Connector (Problem 2)
+- [x] `traffic_ai/data_pipeline/pems_connector.py`: `PeMSConnector(station_id, api_key, cache_dir)` fetches detector data from PeMS API.
+- [x] Falls back to synthetic Gaussian-mixture calibrated to I-5 San Diego (station 400456) when `PEMS_API_KEY` env var absent; emits `UserWarning`.
+- [x] `--pems-station STATION_ID` CLI flag added to `main.py`; calibration always runs (connector handles fallback).
+- [x] `calibration_by_hour(df)` returns `dict[int, float]` mapping hour → mean volume.
+
+### HCM 7th Edition Physics (Problem 3)
+- [x] `SimulatorConfig`: `min_green_sec=7` (HCM §19.4.3), `yellow_sec=3` (ITE), `all_red_sec=1`, `saturation_flow_rate=1800.0` veh/hr/lane (HCM Table 19-9), `turning_movement_factor=0.60`.
+- [x] Yellow/all-red clearance tracked via `transition_steps_remaining` + `target_phase` in `IntersectionState`; no departures during transitions.
+- [x] `default_config.yaml` updated with all new signal timing and network constants.
+
+### Expanded RL Action Space (Problem 4)
+- [x] `N_ACTIONS = 16`: 2 phases × 8 durations `[15,20,25,30,35,40,45,60]` s.
+- [x] `step()` decodes `phase_idx = action // 8`, `duration = GREEN_DURATIONS[action % 8]`.
+- [x] `cycle_length_penalty=0.02` per duration-second added to reward in `SignalControlEnv`.
+- [x] Observation space expanded to 6 features: `[phase_elapsed/60, duration/60, queue_ns/120, queue_ew/120, tod_norm, upstream_queue/120]`.
+- [x] All RL controllers (`QLearning`, `DQN`, `PolicyGradient`, `A2C`, `SAC`, `RecurrentPPO`) updated; `_action_to_phase(action) = action // 8` preserves `select_action` returning 0 or 1.
+- [x] `RLPolicyController` (wrapper) updated to build matching 6-feature vector.
+
+### EPA MOVES2014b Emissions (Problem 5)
+- [x] Removed fabricated `emissions_proxy = total_queue * 0.21 + phase_changes * 0.8`.
+- [x] `idle_co2_rate_per_sec = 0.000457 kg/s/vehicle` (= 0.0274 kg/min ÷ 60; EPA MOVES2014b Table 3.1).
+- [x] `StepMetrics.emissions_co2_kg` added as first-class field; `emissions_proxy` aliased to it for backward compatibility.
+- [x] `_aggregate_metrics()` exposes `total_emissions_co2_kg`.
+
+### Imitation Learning Labels (Problem 6)
+- [x] `generate_imitation_labels(simulator, rule_controller, n_steps)` added to `ml_controllers.py`: runs `AdaptiveRuleController`, records `(7-feature vector, phase_action)` pairs.
+- [x] `controller_models.py` uses `generate_imitation_labels` for all ML training; `_heuristic_fallback()` retained only for exceptions.
+- [x] `_extract_features()` used consistently at both training time and inference (`SupervisedMLController`) so feature vectors always match.
+
+### Verification
+- [x] `python main.py --quick-run --skip-kaggle` completes cleanly; PeMS synthetic fallback warning as expected.
+- [x] `pytest -q` — **132 tests pass**.
+
 ## Phase 9: Synthetic Data Studio — DONE
 
 ### Backend

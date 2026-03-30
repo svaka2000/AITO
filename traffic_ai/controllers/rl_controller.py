@@ -36,13 +36,16 @@ class RLPolicyController(BaseController):
                 self.green_elapsed[intersection_id] = elapsed
                 continue
 
+            phase_int = 0 if obs.get("current_phase", "NS") == "NS" else 1
+            hour = obs.get("hour_of_day", obs.get("step", 0.0) / 3600.0 % 24.0)
             features = np.array(
                 [
-                    obs.get("queue_ns", 0.0),
-                    obs.get("queue_ew", 0.0),
-                    obs.get("total_queue", 0.0),
-                    obs.get("phase_elapsed", 0.0),
-                    obs.get("wait_sec", 0.0),
+                    obs.get("phase_elapsed", 0.0) / 60.0,
+                    float(phase_int == 0),  # phase_ns flag
+                    obs.get("queue_ns", 0.0) / 120.0,
+                    obs.get("queue_ew", 0.0) / 120.0,
+                    float(hour) / 24.0,  # time_of_day_normalized
+                    obs.get("upstream_queue", 0.0) / 120.0,
                 ],
                 dtype=np.float32,
             )

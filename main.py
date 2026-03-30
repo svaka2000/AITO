@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from traffic_ai.config.settings import load_settings
 from traffic_ai.experiments import ExperimentRunner
 from traffic_ai.utils.reproducibility import set_global_seed
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +48,39 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override output directory from config",
     )
+    parser.add_argument(
+        "--pems-station",
+        type=int,
+        default=None,
+        metavar="STATION_ID",
+        help=(
+            "Caltrans PeMS station ID to use for demand calibration "
+            "(default: 400456 = I-5 near downtown San Diego). "
+            "Requires PEMS_API_KEY env var. Falls back to synthetic data when absent."
+        ),
+    )
     return parser.parse_args()
+
+
+def _maybe_calibrate_from_pems(settings: object, pems_station: int | None) -> None:
+    """Attempt PeMS calibration and store the calibration dict in settings."""
+    station_id = pems_station or int(
+        getattr(settings, "get", lambda k, d: d)("data.pems.station_id", 400456)
+    )
+    try:
+        from traffic_ai.data_pipeline.pems_connector import PeMSConnector
+        connector = PeMSConnector(station_id=station_id)
+        df = connector.fetch("2024-01-15", "2024-01-22")
+        calibration = connector.calibration_by_hour(df)
+        if calibration:
+            settings.payload.setdefault("data", {}).setdefault("pems", {})
+            settings.payload["data"]["pems"]["calibration_by_hour"] = calibration
+            logger.info(
+                "PeMS calibration loaded for station %d (%d hours).",
+                station_id, len(calibration),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PeMS calibration skipped: %s", exc)
 
 
 def main() -> None:
@@ -55,6 +90,10 @@ def main() -> None:
         settings.payload["project"]["output_dir"] = args.output_dir
         settings.output_dir.mkdir(parents=True, exist_ok=True)
     set_global_seed(settings.seed)
+
+    # Attempt PeMS demand calibration (falls back gracefully if unavailable)
+    if args.pems_station is not None or True:  # always try; connector handles fallback
+        _maybe_calibrate_from_pems(settings, args.pems_station)
 
     runner = ExperimentRunner(settings=settings, quick_run=args.quick_run)
     artifacts = runner.run(

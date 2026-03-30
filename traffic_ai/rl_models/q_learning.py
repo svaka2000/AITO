@@ -9,23 +9,31 @@ import numpy as np
 from traffic_ai.rl_models.environment import SignalControlEnv
 
 
+N_ACTIONS_ENV: int = 16  # matches SignalControlEnv.n_actions
+
+
 @dataclass(slots=True)
 class QLearningPolicy:
     q_table: dict[tuple[int, int, int], np.ndarray]
+    n_actions: int = N_ACTIONS_ENV
 
     def act(self, features: np.ndarray) -> int:
+        """Return phase index (0=NS, 1=EW) from the Q-table."""
         key = discretize_state(features)
         values = self.q_table.get(key)
         if values is None:
-            return int(features[0] < features[1])
-        return int(np.argmax(values))
+            return int(features[2] < features[3])  # queue_ns_norm < queue_ew_norm → EW
+        full_action = int(np.argmax(values))
+        # Extract phase from joint (phase, duration) action
+        return full_action // 8
 
 
 def discretize_state(state: np.ndarray) -> tuple[int, int, int]:
-    queue_ns = int(min(12, state[0] // 8))
-    queue_ew = int(min(12, state[1] // 8))
-    phase_elapsed = int(min(8, state[3] // 10))
-    return queue_ns, queue_ew, phase_elapsed
+    # state = [phase_elapsed_norm, phase_ns, queue_ns_norm, queue_ew_norm, tod, upstream]
+    queue_ns_bucket = int(min(12, state[2] * 120 // 8))   # queue_ns_norm → raw → bucket
+    queue_ew_bucket = int(min(12, state[3] * 120 // 8))
+    phase_elapsed_bucket = int(min(8, state[0] * 60 // 10))
+    return queue_ns_bucket, queue_ew_bucket, phase_elapsed_bucket
 
 
 def train_q_learning(
@@ -38,8 +46,9 @@ def train_q_learning(
     seed: int = 42,
 ) -> tuple[QLearningPolicy, list[float]]:
     rng = np.random.default_rng(seed)
+    n_act = env.n_actions
     q_table: DefaultDict[tuple[int, int, int], np.ndarray] = defaultdict(
-        lambda: np.zeros(2, dtype=np.float32)
+        lambda: np.zeros(n_act, dtype=np.float32)
     )
     rewards: list[float] = []
     epsilon = epsilon_start
@@ -52,7 +61,7 @@ def train_q_learning(
         while not done:
             key = discretize_state(state)
             if rng.random() < epsilon:
-                action = int(rng.integers(0, 2))
+                action = int(rng.integers(0, n_act))
             else:
                 action = int(np.argmax(q_table[key]))
             next_state, reward, done, _ = env.step(action)
@@ -65,6 +74,6 @@ def train_q_learning(
         epsilon = max(epsilon_end, epsilon - decay)
         rewards.append(float(episode_reward))
 
-    policy = QLearningPolicy(q_table={k: v.copy() for k, v in q_table.items()})
+    policy = QLearningPolicy(q_table={k: v.copy() for k, v in q_table.items()}, n_actions=n_act)
     return policy, rewards
 

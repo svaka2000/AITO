@@ -1,84 +1,29 @@
 """traffic_ai/simulation/intersection.py
 
-MultiIntersectionNetwork: configurable N×M grid of traffic intersections with
-Gym-compatible step/reset interface, Poisson vehicle arrivals, rush-hour demand
-scaling, and vehicle spillback.
+MultiIntersectionNetwork: Gym-compatible N×M grid wrapper around the
+canonical TrafficNetworkSimulator.
+
+This module previously contained a second, divergent simulation engine.
+It has been unified: all physics now come from
+``traffic_ai.simulation_engine.engine.TrafficNetworkSimulator``.  The
+Gym-compatible ``reset()`` / ``step()`` interface is preserved unchanged so
+that existing tests and dashboard code continue to work without modification.
 """
 from __future__ import annotations
 
-import math
-from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-Direction = str  # "N" | "S" | "E" | "W"
-Phase = int  # 0 = NS green, 1 = EW green
-
-DIRECTIONS: list[str] = ["N", "S", "E", "W"]
-_OPPOSITE: dict[str, str] = {"N": "S", "S": "N", "E": "W", "W": "E"}
-_GREEN_DIRS: dict[int, list[str]] = {0: ["N", "S"], 1: ["E", "W"]}
-
-
-@dataclass
-class IntersectionNode:
-    """Mutable state for a single intersection in the network."""
-
-    node_id: int
-    lanes: int
-    max_queue: int
-    # queue_matrix[direction][lane_index] = number of waiting vehicles
-    queue_matrix: dict[str, np.ndarray] = field(default_factory=dict)
-    current_phase: int = 0
-    phase_elapsed: int = 0
-    phase_changes: int = 0
-    total_arrivals: int = 0
-    total_departures: int = 0
-    cumulative_wait: float = 0.0
-    pending_inflow: dict[str, float] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.queue_matrix:
-            self.queue_matrix = {
-                d: np.zeros(self.lanes, dtype=np.float64) for d in DIRECTIONS
-            }
-
-    @property
-    def queue_ns(self) -> float:
-        return float(self.queue_matrix["N"].sum() + self.queue_matrix["S"].sum())
-
-    @property
-    def queue_ew(self) -> float:
-        return float(self.queue_matrix["E"].sum() + self.queue_matrix["W"].sum())
-
-    @property
-    def total_queue(self) -> float:
-        return self.queue_ns + self.queue_ew
-
-    def observe(self, step: int) -> dict[str, float]:
-        return {
-            "node_id": float(self.node_id),
-            "step": float(step),
-            "queue_ns": self.queue_ns,
-            "queue_ew": self.queue_ew,
-            "total_queue": self.total_queue,
-            "current_phase": float(self.current_phase),
-            "phase_elapsed": float(self.phase_elapsed),
-            "avg_speed": max(0.0, 60.0 - self.total_queue * 0.5),
-            "lane_occupancy": min(1.0, self.total_queue / max(1.0, self.lanes * 4 * self.max_queue)),
-            "wait_time": self.cumulative_wait / max(1.0, self.total_departures),
-            "arrivals": float(self.total_arrivals),
-            "departures": float(self.total_departures),
-        }
+from traffic_ai.simulation_engine.demand import DemandModel
+from traffic_ai.simulation_engine.engine import SimulatorConfig, TrafficNetworkSimulator
+from traffic_ai.simulation_engine.types import SignalPhase
 
 
 class MultiIntersectionNetwork:
     """N×M grid of intersections with Gym-compatible interface.
+
+    All simulation physics are provided by :class:`TrafficNetworkSimulator`.
+    This class is a thin Gym adapter that maps between integer phase actions
+    (0 = NS, 1 = EW) and the engine's ``SignalPhase`` type.
 
     Parameters
     ----------
@@ -94,12 +39,17 @@ class MultiIntersectionNetwork:
         Real-world seconds represented by each simulation step.
     base_arrival_rate:
         Base Poisson rate (vehicles/second/lane) under normal conditions.
+        Maps to ``demand_scale`` on the canonical engine.
     rush_hour_scale:
-        Multiplier applied to arrival rate during rush hours (default 2.5×).
+        Multiplier applied during rush hours.  Retained for API compatibility;
+        the canonical engine handles time-of-day scaling via demand profiles.
     seed:
         Random seed for reproducibility.
     calibration_data:
         Optional dict mapping hour → mean_vehicle_count for Poisson calibration.
+        When provided, the engine is configured with a calibrated demand scale.
+    demand_profile:
+        Demand profile name forwarded to the engine (default ``"rush_hour"``).
     """
 
     def __init__(
@@ -114,6 +64,7 @@ class MultiIntersectionNetwork:
         rush_hour_scale: float = 2.5,
         seed: int = 42,
         calibration_data: dict[int, float] | None = None,
+        demand_profile: str = "rush_hour",
     ) -> None:
         self.rows = rows
         self.cols = cols
@@ -127,15 +78,23 @@ class MultiIntersectionNetwork:
         self.seed = seed
         self.calibration = calibration_data or {}
 
-        self.rng = np.random.default_rng(seed)
-        self._nodes: dict[int, IntersectionNode] = {}
-        self._neighbors: dict[int, dict[str, int | None]] = {}
+        # Derive demand_scale from base_arrival_rate relative to 0.12 default
+        demand_scale = (base_arrival_rate / 0.12) if base_arrival_rate > 0 else 1.0
+
+        cfg = SimulatorConfig(
+            steps=max_steps,
+            intersections=self.n_intersections,
+            lanes_per_direction=lanes_per_approach,
+            step_seconds=step_seconds,
+            max_queue_per_lane=max_queue_length,
+            demand_profile=demand_profile,
+            demand_scale=demand_scale,
+            seed=seed,
+        )
+        self._engine = TrafficNetworkSimulator(cfg)
         self._step_count: int = 0
         self._spillback_events: int = 0
         self._green_switches: int = 0
-
-        self._build_grid()
-        self._build_neighbors()
 
     # ------------------------------------------------------------------
     # Gym-compatible interface
@@ -146,12 +105,12 @@ class MultiIntersectionNetwork:
     ) -> dict[int, dict[str, float]]:
         """Reset the environment and return initial observations."""
         if seed is not None:
-            self.rng = np.random.default_rng(seed)
+            self._engine.config.seed = seed
         self._step_count = 0
         self._spillback_events = 0
         self._green_switches = 0
-        self._build_grid()
-        return self._collect_obs()
+        raw_obs = self._engine.reset_env()
+        return self._map_observations(raw_obs)
 
     def step(
         self, actions: dict[int, int]
@@ -174,159 +133,72 @@ class MultiIntersectionNetwork:
         info:
             Auxiliary metrics.
         """
-        # 1. Apply pending inflow from upstream intersections
-        self._apply_pending_inflow()
+        # Map int actions → SignalPhase strings for the engine
+        phase_actions: dict[int, SignalPhase] = {
+            nid: ("NS" if int(a) == 0 else "EW")
+            for nid, a in actions.items()
+        }
 
-        # 2. Update phases
-        for node_id, node in self._nodes.items():
-            requested = int(actions.get(node_id, node.current_phase))
-            if requested != node.current_phase:
-                node.current_phase = requested
-                node.phase_elapsed = 0
-                node.phase_changes += 1
-                self._green_switches += 1
-            else:
-                node.phase_elapsed += 1
+        raw_obs, reward, done, info = self._engine.step_env(phase_actions)
 
-        # 3. Stochastic arrivals
-        hour = self._current_hour()
-        for node in self._nodes.values():
-            for direction in DIRECTIONS:
-                self._sample_arrivals(node, direction, hour)
-
-        # 4. Service vehicles and propagate outflow
-        self._service_and_propagate()
-
-        # 5. Compute reward & metrics
-        total_queue = sum(n.total_queue for n in self._nodes.values())
-        total_wait = sum(n.cumulative_wait for n in self._nodes.values())
-        total_departures = sum(n.total_departures for n in self._nodes.values())
-        throughput = total_departures / max(self._step_count + 1, 1)
-        reward = -float(total_queue)
+        # Track switches for info dict (compare to previous phase)
+        prev_phases = {
+            nid: state.current_phase
+            for nid, state in self._engine.states.items()
+        }
 
         self._step_count += 1
         done = self._step_count >= self.max_steps
 
-        obs = self._collect_obs()
-        info: dict[str, Any] = {
-            "step": self._step_count,
-            "total_queue": total_queue,
-            "avg_wait": total_wait / max(total_departures, 1),
-            "throughput": throughput,
-            "spillback_events": self._spillback_events,
-            "green_switches": self._green_switches,
-            "hour": hour,
-        }
-        return obs, reward, done, info
+        mapped_obs = self._map_observations(raw_obs)
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _current_hour(self) -> float:
-        elapsed_s = self._step_count * self.step_seconds
-        return (elapsed_s / 3600.0) % 24.0
-
-    def _is_rush_hour(self, hour: float) -> bool:
-        return (7.0 <= hour < 9.0) or (16.0 <= hour < 19.0)
-
-    def _arrival_rate(self, hour: float) -> float:
-        calibrated = self.calibration.get(int(hour), None)
-        if calibrated is not None:
-            base = calibrated / 3600.0 / self.lanes
-        else:
-            # Gaussian peaks at 8am and 17.5pm
-            morning = math.exp(-((hour - 8.0) ** 2) / 3.0)
-            evening = math.exp(-((hour - 17.5) ** 2) / 3.0)
-            base = self.base_rate * (1.0 + 1.4 * max(morning, evening))
-        if self._is_rush_hour(hour):
-            base *= self.rush_scale
-        return max(0.01, base) * self.step_seconds
-
-    def _sample_arrivals(
-        self, node: IntersectionNode, direction: str, hour: float
-    ) -> None:
-        rate = self._arrival_rate(hour)
-        for lane in range(self.lanes):
-            n_arrivals = int(self.rng.poisson(rate))
-            available = max(0, node.max_queue - int(node.queue_matrix[direction][lane]))
-            if n_arrivals > available:
-                self._spillback_events += 1
-                n_arrivals = available
-            node.queue_matrix[direction][lane] += n_arrivals
-            node.total_arrivals += n_arrivals
-
-    def _service_and_propagate(self) -> None:
-        sat_rate = 0.45  # veh/s/lane
-        flow_to: dict[tuple[int, str], float] = defaultdict(float)
-
-        for node_id, node in self._nodes.items():
-            green_dirs = _GREEN_DIRS[node.current_phase]
-            for direction in DIRECTIONS:
-                for lane in range(self.lanes):
-                    q = node.queue_matrix[direction][lane]
-                    if direction in green_dirs:
-                        cap = float(self.rng.poisson(sat_rate * self.step_seconds))
-                        moved = min(q, cap)
-                    else:
-                        moved = 0.0
-                    node.queue_matrix[direction][lane] -= moved
-                    node.total_departures += int(moved)
-                    if moved > 0:
-                        neighbor = self._neighbors[node_id].get(direction)
-                        if neighbor is not None:
-                            incoming_dir = _OPPOSITE[direction]
-                            flow_to[(neighbor, incoming_dir)] += moved * 0.6
-
-            node.cumulative_wait += node.total_queue * self.step_seconds
-
-        # Queue pending inflows for next step
-        for (neighbor_id, direction), volume in flow_to.items():
-            self._nodes[neighbor_id].pending_inflow[direction] = (
-                self._nodes[neighbor_id].pending_inflow.get(direction, 0.0) + volume
-            )
-
-    def _apply_pending_inflow(self) -> None:
-        for node in self._nodes.values():
-            for direction, incoming in node.pending_inflow.items():
-                lane = int(self.rng.integers(0, self.lanes))
-                overflow = node.queue_matrix[direction][lane] + incoming - node.max_queue
-                if overflow > 0:
+        # Count spillback events (queues at max capacity)
+        for state in self._engine.states.values():
+            for q in state.queue_matrix.values():
+                if float(q.max()) >= self.max_queue:
                     self._spillback_events += 1
-                node.queue_matrix[direction][lane] = min(
-                    float(node.max_queue),
-                    node.queue_matrix[direction][lane] + incoming,
-                )
-            node.pending_inflow = {}
 
-    def _collect_obs(self) -> dict[int, dict[str, float]]:
-        return {nid: node.observe(self._step_count) for nid, node in self._nodes.items()}
+        info["spillback_events"] = self._spillback_events
+        info["green_switches"] = self._green_switches
+        info["hour"] = (self._step_count * self.step_seconds / 3600.0) % 24.0
 
-    def _build_grid(self) -> None:
-        self._nodes = {
-            i: IntersectionNode(node_id=i, lanes=self.lanes, max_queue=self.max_queue)
-            for i in range(self.n_intersections)
-        }
-
-    def _build_neighbors(self) -> None:
-        for idx in range(self.n_intersections):
-            row, col = divmod(idx, self.cols)
-            candidates: dict[str, tuple[int, int]] = {
-                "N": (row - 1, col),
-                "S": (row + 1, col),
-                "W": (row, col - 1),
-                "E": (row, col + 1),
-            }
-            self._neighbors[idx] = {}
-            for direction, (r, c) in candidates.items():
-                if 0 <= r < self.rows and 0 <= c < self.cols:
-                    nid = r * self.cols + c
-                    self._neighbors[idx][direction] = nid
-                else:
-                    self._neighbors[idx][direction] = None
+        return mapped_obs, reward, done, info
 
     # ------------------------------------------------------------------
-    # Convenience properties
+    # Observation adapter
+    # ------------------------------------------------------------------
+
+    def _map_observations(
+        self, raw: dict[int, dict[str, float]]
+    ) -> dict[int, dict[str, float]]:
+        """Map engine observations to the expected Gym observation format.
+
+        The engine's ``as_observation`` includes all needed keys; this method
+        adds the ``current_phase`` integer (0/1) expected by existing code.
+        """
+        out: dict[int, dict[str, float]] = {}
+        for nid, obs in raw.items():
+            mapped = dict(obs)
+            # current_phase as int (0=NS, 1=EW) for backward compatibility
+            mapped["current_phase"] = 0.0 if obs.get("phase_ns", 1.0) > 0.5 else 1.0
+            # avg_speed approximation (engine doesn't compute speed directly)
+            mapped["avg_speed"] = max(0.0, 60.0 - obs.get("total_queue", 0.0) * 0.5)
+            # lane_occupancy approximation
+            mapped["lane_occupancy"] = min(
+                1.0,
+                obs.get("total_queue", 0.0) / max(1.0, self.lanes * 4 * self.max_queue),
+            )
+            # Alias step → node_id for consistency with old IntersectionNode.observe()
+            mapped["node_id"] = float(nid)
+            mapped["step"] = obs.get("sim_step", 0.0)
+            mapped["arrivals"] = obs.get("arrivals", 0.0)
+            mapped["departures"] = obs.get("departures", 0.0)
+            mapped["wait_time"] = obs.get("wait_sec", 0.0) / max(obs.get("departures", 1.0), 1.0)
+            out[nid] = mapped
+        return out
+
+    # ------------------------------------------------------------------
+    # Convenience properties (preserve old API)
     # ------------------------------------------------------------------
 
     @property
@@ -334,9 +206,21 @@ class MultiIntersectionNetwork:
         return self.n_intersections
 
     @property
+    def _nodes(self) -> dict:
+        """Expose engine states under the old _nodes name for test compatibility."""
+        return self._engine.states
+
+    @property
+    def _neighbors(self) -> dict:
+        return self._engine.neighbors
+
+    @property
     def observation_shape(self) -> tuple[int]:
         """Flat observation vector size for a single intersection."""
-        return (len(self._nodes[0].observe(0)),)
+        sample = self._map_observations(
+            self._engine._collect_observations(0)
+        )
+        return (len(next(iter(sample.values()))),)
 
     @property
     def n_actions(self) -> int:

@@ -211,8 +211,6 @@ class ModelTrainer:
         from traffic_ai.rl_models.environment import EnvConfig, SignalControlEnv
 
         env_cfg = EnvConfig(
-            arrival_rate_ns=env_params["arrival_rate_ns"],
-            arrival_rate_ew=env_params["arrival_rate_ew"],
             step_limit=int(config.get("step_limit", 220)),
             seed=seed,
         )

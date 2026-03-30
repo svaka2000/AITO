@@ -3,10 +3,18 @@ from __future__ import annotations
 import numpy as np
 
 from traffic_ai.controllers.base import BaseController
+from traffic_ai.controllers.ml_controllers import _extract_features
 from traffic_ai.simulation_engine.types import SignalPhase
 
 
 class SupervisedMLController(BaseController):
+    """Wrapper that uses a trained sklearn classifier for signal control.
+
+    Feature extraction uses ``_extract_features`` from ``ml_controllers`` so
+    that inference features exactly match the imitation-learning training
+    features (both use the same 7-feature vector).
+    """
+
     def __init__(
         self,
         model: object,
@@ -35,19 +43,8 @@ class SupervisedMLController(BaseController):
                 self.green_elapsed[intersection_id] = elapsed
                 continue
 
-            feature_vector = np.array(
-                [
-                    obs.get("queue_ns", 0.0),
-                    obs.get("queue_ew", 0.0),
-                    obs.get("total_queue", 0.0),
-                    obs.get("phase_elapsed", 0.0),
-                    obs.get("phase_ns", 0.0),
-                    obs.get("phase_ew", 0.0),
-                    obs.get("sim_step", 0.0),
-                    obs.get("wait_sec", 0.0),
-                ],
-                dtype=np.float64,
-            ).reshape(1, -1)
+            # Use the same 7-feature vector as training (imitation learning)
+            feature_vector = _extract_features(obs).reshape(1, -1).astype(np.float64)
             pred = int(self.model.predict(feature_vector)[0])
             next_phase: SignalPhase = "NS" if pred == 0 else "EW"
             if next_phase != phase:

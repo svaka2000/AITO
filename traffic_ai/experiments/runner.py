@@ -140,7 +140,10 @@ class ExperimentRunner:
             cv_folds=self._cv_folds(),
             quick_mode=self.quick_run,
         )
-        supervised_controller_models = train_supervised_controller_models(seed=self.settings.seed)
+        # Use imitation learning labels from AdaptiveRuleController (Problem 6)
+        supervised_controller_models = train_supervised_controller_models(
+            seed=self.settings.seed, quick_run=self.quick_run
+        )
         return supervised_metrics_df, supervised_controller_models
 
     # -------------------------------------------------------------------------

@@ -33,6 +33,14 @@ data:
     - name: sample_loop_detector
       url: https://raw.githubusercontent.com/jbrownlee/Datasets/master/airline-passengers.csv
       enabled: true
+  # Caltrans PeMS (Performance Measurement System) data connector
+  # Set PEMS_API_KEY environment variable to enable real-data calibration.
+  # Falls back to synthetic data when the key is absent.
+  pems:
+    station_id: 400456        # I-5 near downtown San Diego (Caltrans District 11)
+    api_key_env_var: PEMS_API_KEY
+    date_from: "2024-01-15"   # default calibration window start
+    date_to: "2024-01-22"     # default calibration window end (1 week)
 
 simulation:
   steps: 2000
@@ -42,10 +50,24 @@ simulation:
   demand_profile: rush_hour
   demand_scale: 1.0
   max_queue_per_lane: 60
-  # Multi-intersection grid settings (Phase 2 simulation engine)
+  # Multi-intersection grid settings
   grid_rows: 2
   grid_cols: 2
   rush_hour_scale: 2.5
+
+  # HCM 7th edition signal timing defaults
+  # (Highway Capacity Manual, 7th Edition, Transportation Research Board, 2022)
+  signal_timing:
+    min_green_sec: 7          # minimum green interval (HCM 7th ed., §19.6)
+    yellow_sec: 3             # yellow change interval (HCM 7th ed., §19.6)
+    all_red_sec: 1            # all-red clearance interval (HCM 7th ed., §19.6)
+    saturation_flow_rate: 1800  # veh/hr/lane — HCM 7th ed. default for LT+TH+RT movements
+
+  # Network flow parameters
+  network:
+    # Fraction of departing vehicles forwarded to the downstream intersection.
+    # HCM-aligned default (replaces the previously hardcoded 0.65 which had no cited source).
+    turning_movement_factor: 0.60
 
 controllers:
   fixed_timing:
@@ -90,4 +112,3 @@ experiments:
     n_episodes: 50
   significance_alpha: 0.05
   n_bootstrap: 300
-
