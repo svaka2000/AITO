@@ -2,37 +2,28 @@
 
 GF10: Natural Language Interface for Traffic Engineers.
 
-A Claude-powered conversational interface that allows traffic engineers
-to query AITO in plain English — no programming required.
+Entry point for all engineer queries. Routes through the multi-agent
+orchestrator (aito/agents/orchestrator.py) which delegates to:
+  - ScenarioAgent  : what-if / spillback / event demand / retiming
+  - IncidentAgent  : 3-sub-agent incident response chain
+  - NegotiationAgent: dual-Claude Caltrans ↔ City of San Diego coordination
+  - CarbonAgent    : EPA MOVES + Verra VCS / CARB LCFS credit portfolio
 
-Capabilities:
-  - Explain timing plans and optimization results
-  - Answer "what if" questions (what happens if I increase cycle by 10s?)
-  - Generate optimization requests from natural language descriptions
-  - Interpret HCM/MUTCD terminology and explain violations
-  - Draft Synchro reports and stakeholder summaries
-  - Compare AITO results against InSync/SCOOT benchmarks
-
-Architecture:
-  - NLEngineerSession maintains conversation context and corridor state
-  - Uses structured tool calls to AITO optimization modules
-  - Returns engineer-grade explanations with citations
+Without ANTHROPIC_API_KEY: falls back to structured template responses (no billing).
 
 Usage:
     session = NLEngineerSession(corridor=rosecrans, anthropic_api_key="...")
-    response = session.ask("Why is the PM peak cycle so long at Midway?")
-    response2 = session.ask("Show me what happens if we reduce it to 100s")
-
-Note: This module requires ANTHROPIC_API_KEY. Falls back to structured
-templates if API key is not available (for testing without billing).
+    response = session.ask("Why is PM peak cycle so long at Midway?")
+    response2 = session.ask("What if we reduce cycle to 100s?")
+    for event in session.stream("Negotiate Caltrans timing on Rosecrans"):
+        print(event)
 """
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional
+from typing import Generator, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -41,10 +32,11 @@ from typing import Optional
 
 @dataclass
 class NLResponse:
-    """Structured response from the NL engineer interface."""
     query: str
     answer: str
-    technical_details: Optional[dict] = None
+    agent_name: str = "nl_engineer"
+    reasoning_trace: str = ""
+    tool_calls: list = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
     followup_suggestions: list[str] = field(default_factory=list)
     confidence: float = 1.0
@@ -52,7 +44,7 @@ class NLResponse:
 
 
 # ---------------------------------------------------------------------------
-# Query classifier (rule-based, no LLM required)
+# Query classifier (template-mode fallback — no API key needed)
 # ---------------------------------------------------------------------------
 
 class QueryType:
@@ -94,50 +86,43 @@ _QUERY_KEYWORDS: dict[str, list[str]] = {
 
 
 def classify_query(query: str) -> str:
-    query_lower = query.lower()
+    q = query.lower()
     scores: dict[str, int] = {qt: 0 for qt in _QUERY_KEYWORDS}
     for qt, keywords in _QUERY_KEYWORDS.items():
         for kw in keywords:
-            if kw in query_lower:
+            if kw in q:
                 scores[qt] += 1
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else QueryType.GENERAL
 
 
 # ---------------------------------------------------------------------------
-# Template-based responses (no API key required)
+# Template responses (no API key)
 # ---------------------------------------------------------------------------
 
-def _explain_timing_plan_template(
-    corridor_name: str,
-    optimization_result,
-) -> str:
-    """Generate a human-readable timing plan explanation without LLM."""
+def _explain_timing_plan_template(corridor_name: str, optimization_result) -> str:
     if optimization_result is None:
         return f"No optimization result available for {corridor_name} yet. Run an optimization first."
-
     rec = optimization_result.recommended_solution
     plan = rec.plan
     lines = [
         f"**{corridor_name} — Optimization Summary**\n",
         f"Common cycle: **{plan.cycle_length:.0f} seconds**",
-        f"Outbound bandwidth: {plan.bandwidth_outbound:.1f}s ({plan.bandwidth_outbound / plan.cycle_length * 100:.1f}% of cycle)",
-        f"Inbound bandwidth: {plan.bandwidth_inbound:.1f}s ({plan.bandwidth_inbound / plan.cycle_length * 100:.1f}% of cycle)",
+        f"Outbound bandwidth: {plan.bandwidth_outbound:.1f}s ({plan.bandwidth_outbound / plan.cycle_length * 100:.1f}%)",
+        f"Inbound bandwidth: {plan.bandwidth_inbound:.1f}s ({plan.bandwidth_inbound / plan.cycle_length * 100:.1f}%)",
         f"\nObjective scores:",
-        f"  • Delay: {rec.delay_score:.1f} s/veh (lower is better)",
+        f"  • Delay: {rec.delay_score:.1f} s/veh",
         f"  • Emissions: {rec.emissions_score:.1f} kg CO₂/hr",
         f"  • Stops: {rec.stops_score:.2f} stops/veh",
         f"\n{len(optimization_result.pareto_solutions)} Pareto-optimal solutions found.",
-        f"The recommended plan balances delay, emissions, and stops simultaneously.",
     ]
     return "\n".join(lines)
 
 
 def _what_if_template(query: str, corridor) -> str:
     return (
-        f"To evaluate '{query}', I'll need to run a simulation. "
-        f"Call `session.run_what_if(scenario)` with a specific scenario, "
-        f"or enable the Claude API for fully conversational analysis."
+        f"To evaluate '{query}', call `session.ask()` with ANTHROPIC_API_KEY set "
+        f"for full scenario simulation, or call the ScenarioAgent directly."
     )
 
 
@@ -151,8 +136,7 @@ def _carbon_template(corridor, reduction_pct: float = 23.5) -> str:
         f"≈ {est_tonnes:.0f} tonnes CO₂/year across {n} intersections\n\n"
         f"At California LCFS market price (~$65/tonne):\n"
         f"  Estimated annual revenue: **${est_tonnes * 65 * 0.92:,.0f}**\n\n"
-        f"*Based on EPA MOVES2014b idle emission factor (1.38 g CO₂/s) and "
-        f"{aadt:,} AADT. For certified Verra VCS credits, full MRV documentation required.*"
+        f"*Based on EPA MOVES2014b idle factor (1.38 g CO₂/s) and {aadt:,} AADT.*"
     )
 
 
@@ -168,21 +152,19 @@ def _compare_template(competitor: str) -> str:
             "| Carbon accounting | None | EPA MOVES2014b certified |\n"
             "| Auto-retiming | Manual call-out | Continuous (GF7) |\n"
             "| Open source | No | Yes (MIT) |\n\n"
-            "San Diego benchmark: InSync achieved 25% TT reduction, 53% stop reduction (2017). "
-            "AITO targets matching this without requiring loop detector maintenance."
+            "San Diego benchmark: InSync achieved 25% TT reduction, 53% stop reduction (2017)."
         ),
         "scoot": (
             "**AITO vs. SCOOT (TfL)**\n\n"
-            "SCOOT uses real-time loop detector occupancy to adjust splits/offsets every 4 seconds. "
-            "AITO uses probe data (CV trajectories, INRIX) achieving similar performance without "
-            "detector infrastructure. SCOOT requires Scoot detectors at every approach; "
-            "AITO works at 25%+ CV penetration."
+            "SCOOT uses real-time loop detector occupancy. "
+            "AITO uses probe data (CV trajectories, INRIX) without detector infrastructure. "
+            "SCOOT requires detectors at every approach; AITO works at 25%+ CV penetration."
         ),
     }
     for key, text in comparisons.items():
         if key in competitor.lower():
             return text
-    return f"Comparison with '{competitor}' not yet in database. Supported: InSync, SCOOT, SURTRAC."
+    return f"Comparison with '{competitor}' not in database. Supported: InSync, SCOOT, SURTRAC."
 
 
 # ---------------------------------------------------------------------------
@@ -190,37 +172,12 @@ def _compare_template(competitor: str) -> str:
 # ---------------------------------------------------------------------------
 
 class NLEngineerSession:
-    """Conversational interface for traffic engineers.
+    """Conversational interface routing through the AITO multi-agent orchestrator.
 
-    Two modes:
-    1. Template mode (no API key): structured rule-based responses
-    2. Claude API mode (with API key): full LLM-powered conversation
-
-    Usage:
-        session = NLEngineerSession(corridor=rosecrans_corridor)
-        response = session.ask("Explain the PM peak timing plan")
-        print(response.answer)
+    Modes:
+      1. Orchestrator mode (with ANTHROPIC_API_KEY): full Claude Opus 4.7 multi-agent system.
+      2. Template mode (no API key): structured rule-based responses, no billing.
     """
-
-    SYSTEM_PROMPT = """You are AITO — an AI Traffic Optimization expert assistant.
-You help traffic engineers understand and apply AI-optimized signal timing.
-
-Your knowledge base:
-- HCM 7th Edition (Highway Capacity Manual)
-- MUTCD 2023 (Manual on Uniform Traffic Control Devices)
-- ITE Traffic Engineering Handbook
-- EPA MOVES2014b emission factors
-- FHWA signal timing manual
-- NTCIP 1202 v03 (signal controller protocol)
-
-When answering:
-1. Be technically precise. Use correct units (s/veh, kg CO₂/hr, veh/hr).
-2. Cite MUTCD/HCM sections when discussing standards.
-3. Explain optimization results in plain English for non-engineers too.
-4. Always distinguish confirmed findings from inferences.
-5. Propose specific next steps the engineer can take.
-
-Current corridor context will be provided in each message."""
 
     def __init__(
         self,
@@ -231,86 +188,84 @@ Current corridor context will be provided in each message."""
         self.corridor = corridor
         self.optimization_result = optimization_result
         self._api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self._conversation_history: list[dict] = []
         self._use_claude = self._api_key is not None
+        self._orchestrator = None  # lazy init
+
+    def _get_orchestrator(self):
+        if self._orchestrator is None:
+            from aito.agents.orchestrator import OrchestratorAgent
+            self._orchestrator = OrchestratorAgent(
+                corridor=self.corridor,
+                optimization_result=self.optimization_result,
+                api_key=self._api_key,
+            )
+        return self._orchestrator
 
     def ask(self, query: str) -> NLResponse:
         """Ask a question and get an engineer-grade response."""
-        query_type = classify_query(query)
-
         if self._use_claude:
-            return self._ask_claude(query, query_type)
-        return self._ask_template(query, query_type)
+            return self._ask_orchestrator(query)
+        return self._ask_template(query, classify_query(query))
 
-    def _build_context(self) -> str:
-        """Build corridor context string for Claude."""
-        lines = []
-        if self.corridor:
-            lines.append(f"Corridor: {self.corridor.name}")
-            lines.append(f"Intersections: {len(self.corridor.intersections)}")
-            lines.append(f"Speed limit: {self.corridor.speed_limits_mph[0] if self.corridor.speed_limits_mph else 35} mph")
-            lines.append(f"AADT: {self.corridor.aadt:,} veh/day")
+    def stream(self, query: str) -> Generator[dict, None, None]:
+        """Stream events for the Streamlit 4-pane UI.
 
-        if self.optimization_result:
-            rec = self.optimization_result.recommended_solution
-            lines.append(f"Cycle: {rec.plan.cycle_length:.0f}s")
-            lines.append(f"Delay: {rec.delay_score:.1f} s/veh")
-            lines.append(f"CO₂: {rec.emissions_score:.1f} kg/hr")
-            lines.append(f"Pareto solutions: {len(self.optimization_result.pareto_solutions)}")
+        Yields dicts:
+          {"type": "routing", "intent": ...}
+          {"type": "thinking_delta", "text": ...}
+          {"type": "text_delta", "text": ...}
+          {"type": "tool_start", "name": ..., "inputs": ...}
+          {"type": "tool_result", "name": ..., "output": ..., "duration_ms": ...}
+          {"type": "done", "result": NLResponse}
+        """
+        if not self._use_claude:
+            qt = classify_query(query)
+            result = self._ask_template(query, qt)
+            yield {"type": "text_delta", "text": result.answer}
+            yield {"type": "done", "result": result}
+            return
 
-        return "\n".join(lines) if lines else "No corridor loaded."
+        orchestrator = self._get_orchestrator()
+        for event in orchestrator.stream_route(query):
+            if event.get("type") == "done":
+                agent_result = event["result"]
+                yield {
+                    "type": "done",
+                    "result": NLResponse(
+                        query=query,
+                        answer=agent_result.final_output,
+                        agent_name=agent_result.agent_name,
+                        reasoning_trace=agent_result.reasoning_trace,
+                        tool_calls=agent_result.tool_calls,
+                        citations=agent_result.citations_to_modules,
+                        followup_suggestions=self._suggest_followups(classify_query(query)),
+                        used_claude_api=True,
+                    ),
+                }
+            else:
+                yield event
 
-    def _ask_claude(self, query: str, query_type: str) -> NLResponse:
-        """Call Claude API for conversational response."""
+    def _ask_orchestrator(self, query: str) -> NLResponse:
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=self._api_key)
-
-            context = self._build_context()
-            user_message = f"[Context]\n{context}\n\n[Engineer Question]\n{query}"
-
-            self._conversation_history.append({
-                "role": "user",
-                "content": user_message,
-            })
-
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1024,
-                system=self.SYSTEM_PROMPT,
-                messages=self._conversation_history,
-            )
-
-            answer = response.content[0].text
-            self._conversation_history.append({
-                "role": "assistant",
-                "content": answer,
-            })
-
+            orchestrator = self._get_orchestrator()
+            agent_result = orchestrator.route(query)
             return NLResponse(
                 query=query,
-                answer=answer,
+                answer=agent_result.final_output,
+                agent_name=agent_result.agent_name,
+                reasoning_trace=agent_result.reasoning_trace,
+                tool_calls=agent_result.tool_calls,
+                citations=agent_result.citations_to_modules,
+                followup_suggestions=self._suggest_followups(classify_query(query)),
                 used_claude_api=True,
-                citations=["HCM 7th Edition", "MUTCD 2023", "EPA MOVES2014b"],
-                followup_suggestions=self._suggest_followups(query_type),
             )
-
-        except ImportError:
-            return NLResponse(
-                query=query,
-                answer="Claude API requires `pip install anthropic`. Falling back to template mode.",
-                used_claude_api=False,
-            )
-        except Exception as e:
-            # Fall back to template on any API error
-            result = self._ask_template(query, query_type)
-            result.answer = f"[API unavailable: {e}]\n\n" + result.answer
+        except Exception as exc:
+            result = self._ask_template(query, classify_query(query))
+            result.answer = f"[API error: {exc}]\n\n" + result.answer
             return result
 
     def _ask_template(self, query: str, query_type: str) -> NLResponse:
-        """Template-based response without Claude API."""
         corridor_name = self.corridor.name if self.corridor else "Unknown corridor"
-
         if query_type == QueryType.EXPLAIN_TIMING:
             answer = _explain_timing_plan_template(corridor_name, self.optimization_result)
         elif query_type == QueryType.WHAT_IF:
@@ -321,17 +276,16 @@ Current corridor context will be provided in each message."""
             answer = _compare_template(query)
         elif query_type == QueryType.VALIDATE:
             answer = (
-                "Validation is run automatically during optimization. "
-                "Check `optimization_result.pareto_solutions[i].plan` "
-                "and the constraints module for MUTCD/HCM compliance details."
+                "Validation runs automatically during optimization. "
+                "Check `optimization_result.pareto_solutions[i].plan` for MUTCD/HCM compliance."
             )
         else:
             answer = (
                 f"I understand you're asking about: '{query}'\n\n"
-                f"For full conversational analysis, set ANTHROPIC_API_KEY in your environment.\n"
+                f"For full multi-agent analysis (scenario simulation, incident response, "
+                f"carbon accounting, cross-jurisdiction negotiation), set ANTHROPIC_API_KEY.\n"
                 f"Current corridor: {corridor_name}"
             )
-
         return NLResponse(
             query=query,
             answer=answer,
@@ -354,8 +308,8 @@ Current corridor context will be provided in each message."""
             ],
             QueryType.CARBON: [
                 "Which carbon credit market pays the most per tonne?",
-                "How do I get Verra VCS certification?",
-                "Compare AITO emissions vs. InSync baseline.",
+                "Generate the full Verra VCS MRV report.",
+                "What's the CARB LCFS revenue for this corridor?",
             ],
             QueryType.COMPARE: [
                 "Show the full Pareto front vs. InSync.",
@@ -364,20 +318,21 @@ Current corridor context will be provided in each message."""
             ],
         }
         return suggestions.get(query_type, [
-            "Run the optimization for Rosecrans corridor.",
+            "Run the NSGA-III optimization for Rosecrans corridor.",
             "Show me the carbon impact.",
-            "What are the MUTCD compliance issues?",
+            "Negotiate timing with Caltrans District 11.",
         ])
 
     def set_optimization_result(self, result) -> None:
-        """Update the optimization result in context."""
         self.optimization_result = result
-        self._conversation_history = []  # Reset context on new result
+        self._orchestrator = None
 
     def set_corridor(self, corridor) -> None:
         self.corridor = corridor
-        self._conversation_history = []
+        self._orchestrator = None
 
     @property
     def conversation_turns(self) -> int:
-        return len([m for m in self._conversation_history if m["role"] == "user"])
+        if self._orchestrator:
+            return getattr(self._orchestrator, "_turn_count", 0)
+        return 0
