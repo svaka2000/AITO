@@ -1,3 +1,6 @@
+> 🏆 **Cerebral Valley Hackathon — Built with Opus 4.7** · [HACKATHON.md](HACKATHON.md) · [Demo Script](HACKATHON_DEMO.md)
+> AITO Copilot: Claude Opus 4.7 + 12-tool MCP server for traffic engineers · `python scripts/aito_copilot.py --canned`
+
 # AITO — AI Traffic Optimization
 
 <div align="center">
